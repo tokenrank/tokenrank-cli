@@ -1,0 +1,1099 @@
+#!/usr/bin/env node
+import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
+import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { homedir, hostname } from "node:os";
+import path from "node:path";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
+
+const execFileAsync = promisify(execFile);
+
+const TOOL_KEYS = [
+  "codex",
+  "claude-code",
+  "hermes",
+  "openclaw",
+  "cline",
+  "opencode",
+  "workbuddy",
+  "gemini",
+  "zcode",
+  "kimi",
+  "kilo-code",
+  "codex-vps",
+  "roo-code",
+  "qwen",
+  "codex-cache",
+];
+
+const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const packageJson = JSON.parse(await readFile(path.join(rootDir, "package.json"), "utf8"));
+const clientVersion = String(packageJson.version ?? "0.0.0");
+
+function usage() {
+  return [
+    "TokenRank collector",
+    "",
+    "Commands:",
+    "  tokenrank tools",
+    "  tokenrank sources",
+    "  tokenrank preview [--json] [--tool tool-id] [--since YYYY-MM-DD]",
+    "  tokenrank connect <webhook-url>",
+    "  tokenrank logout",
+    "  tokenrank upload [--file usage.json] [--tool tool-id] [--since YYYY-MM-DD]",
+    "  tokenrank daemon [--interval seconds] [--once]",
+    "  tokenrank service install [--interval seconds]",
+    "  tokenrank service status",
+    "  tokenrank service uninstall",
+    "",
+    "usage.json can be either { entries: [...] } or an array of aggregate entries.",
+  ].join("\n");
+}
+
+function sourceDefinitions() {
+  const home = homedir();
+  const appSupport = path.join(home, "Library", "Application Support");
+  const codeStorage = path.join(appSupport, "Code", "User", "globalStorage");
+  const cursorStorage = path.join(appSupport, "Cursor", "User", "globalStorage");
+  const xdgData = process.env.XDG_DATA_HOME ?? path.join(home, ".local", "share");
+
+  return [
+    {
+      tool: "codex",
+      label: "Codex",
+      roots: [
+        path.join(process.env.CODEX_HOME ?? path.join(home, ".codex"), "sessions"),
+        path.join(process.env.CODEX_HOME ?? path.join(home, ".codex"), "archived_sessions"),
+      ],
+    },
+    {
+      tool: "claude-code",
+      label: "Claude Code",
+      roots: [
+        path.join(home, ".claude", "projects"),
+        path.join(appSupport, "Claude", "local-agent-mode-sessions"),
+      ],
+    },
+    {
+      tool: "hermes",
+      label: "Hermes",
+      roots: [path.join(home, ".hermes", "sessions"), path.join(home, ".hermes", "logs")],
+    },
+    {
+      tool: "openclaw",
+      label: "OpenClaw",
+      roots: [path.join(home, ".openclaw", "agents"), path.join(home, ".openclaw", "sessions")],
+    },
+    {
+      tool: "cline",
+      label: "Cline",
+      roots: [
+        path.join(codeStorage, "saoudrizwan.claude-dev", "tasks"),
+        path.join(cursorStorage, "saoudrizwan.claude-dev", "tasks"),
+        path.join(home, ".cline", "sessions"),
+      ],
+    },
+    {
+      tool: "opencode",
+      label: "opencode",
+      roots: [path.join(xdgData, "opencode"), path.join(home, ".opencode", "sessions")],
+    },
+    {
+      tool: "workbuddy",
+      label: "WorkBuddy",
+      roots: [path.join(home, ".workbuddy", "traces"), path.join(home, ".workbuddy", "sessions")],
+    },
+    {
+      tool: "gemini",
+      label: "Gemini CLI",
+      roots: [path.join(process.env.GEMINI_CLI_HOME ?? path.join(home, ".gemini"), "tmp")],
+    },
+    {
+      tool: "zcode",
+      label: "ZCode",
+      roots: [path.join(home, ".zcode", "sessions"), path.join(home, ".zcode", "cli", "logs")],
+    },
+    {
+      tool: "kimi",
+      label: "Kimi CLI",
+      roots: [path.join(home, ".kimi", "sessions"), path.join(home, ".kimi-code", "sessions")],
+    },
+    {
+      tool: "kilo-code",
+      label: "Kilo Code",
+      roots: [
+        path.join(codeStorage, "kilocode.kilo-code", "tasks"),
+        path.join(cursorStorage, "kilocode.kilo-code", "tasks"),
+        path.join(home, ".kilo-code", "sessions"),
+      ],
+    },
+    {
+      tool: "codex-vps",
+      label: "Codex VPS",
+      roots: [path.join(home, ".codex-vps", "sessions"), path.join(home, ".codex-vps", "logs")],
+    },
+    {
+      tool: "roo-code",
+      label: "Roo Code",
+      roots: [
+        path.join(codeStorage, "rooveterinaryinc.roo-cline", "tasks"),
+        path.join(cursorStorage, "rooveterinaryinc.roo-cline", "tasks"),
+        path.join(home, ".roo-code", "sessions"),
+      ],
+    },
+    {
+      tool: "qwen",
+      label: "Qwen CLI",
+      roots: [path.join(home, ".qwen", "sessions"), path.join(home, ".qwen", "logs")],
+    },
+    {
+      tool: "codex-cache",
+      label: "Codex Cache",
+      roots: [path.join(process.env.CODEX_HOME ?? path.join(home, ".codex"), "cache")],
+    },
+  ];
+}
+
+function configPath() {
+  return process.env.TOKENRANK_CONFIG ?? path.join(homedir(), ".tokenrank", "config.json");
+}
+
+async function readConfig() {
+  const file = configPath();
+
+  try {
+    return JSON.parse(await readFile(file, "utf8"));
+  } catch {
+    throw new Error("请先运行 tokenrank connect <webhook-url>");
+  }
+}
+
+async function writeConfig(config) {
+  const file = configPath();
+  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  await writeFile(file, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  await chmod(file, 0o600);
+}
+
+async function removeConfig() {
+  await rm(configPath(), { force: true });
+  console.log("已移除本机 webhook 配置。");
+}
+
+function requireWebhookUrl(value) {
+  if (!value) {
+    throw new Error("缺少 webhook URL。请先在 TokenRank 仪表盘生成 webhook。");
+  }
+
+  let url;
+
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("webhook URL 格式不正确。");
+  }
+
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error("webhook URL 必须是 http 或 https。");
+  }
+
+  return url.toString();
+}
+
+function getTimezone() {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+}
+
+function getDeviceId() {
+  const stableInput = `${hostname()}:${homedir()}`;
+  const hash = createHash("sha256").update(stableInput).digest("hex").slice(0, 32);
+  return `tokenrank-${hash}`;
+}
+
+function readOptionalNumber(record, keys) {
+  for (const key of keys) {
+    const value = record[key];
+
+    if (value !== undefined) {
+      if (!Number.isSafeInteger(value) || value < 0) {
+        throw new Error(`${key} 必须是非负整数。`);
+      }
+
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function sumNumbers(record, keys) {
+  let total = 0;
+
+  for (const key of keys) {
+    const value = record[key];
+
+    if (value === undefined) {
+      continue;
+    }
+
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`${key} 必须是非负整数。`);
+    }
+
+    total += value;
+  }
+
+  return total;
+}
+
+function readNumber(record, keys) {
+  return readOptionalNumber(record, keys) ?? 0;
+}
+
+function isIsoCalendarDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return false;
+  }
+
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+
+  return (
+    Number.isFinite(parsed.getTime()) &&
+    parsed.toISOString().slice(0, 10) === value
+  );
+}
+
+function normalizeEntry(rawEntry) {
+  if (!rawEntry || typeof rawEntry !== "object" || Array.isArray(rawEntry)) {
+    throw new Error("每条 usage entry 必须是对象。");
+  }
+
+  const entry = rawEntry;
+  const date = typeof entry.date === "string" ? entry.date : "";
+
+  if (!isIsoCalendarDate(date)) {
+    throw new Error("entry.date 必须是 YYYY-MM-DD 格式的真实日期。");
+  }
+
+  const tool = typeof entry.tool === "string" ? entry.tool : "";
+
+  if (!TOOL_KEYS.includes(tool)) {
+    throw new Error(`不支持的工具: ${tool || "(empty)"}`);
+  }
+
+  const model = typeof entry.model === "string" && entry.model.trim() ? entry.model.trim() : "unknown";
+  const input = readNumber(entry, ["input", "inputTokens"]);
+  const output = readNumber(entry, ["output", "outputTokens"]);
+  const cacheRead = readNumber(entry, ["cacheRead", "cacheReadTokens"]);
+  const cacheWrite = readNumber(entry, ["cacheWrite", "cacheWriteTokens"]);
+  const inferredTotal = input + output + cacheRead + cacheWrite;
+  const total = readOptionalNumber(entry, ["total", "totalTokens"]) ?? inferredTotal;
+
+  if (total !== inferredTotal) {
+    throw new Error("total 必须等于 input + output + cacheRead + cacheWrite。");
+  }
+
+  return {
+    date,
+    tool,
+    model,
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    total,
+  };
+}
+
+function dateFromValue(value) {
+  if (typeof value === "string") {
+    if (isIsoCalendarDate(value)) {
+      return value;
+    }
+
+    const parsed = new Date(value);
+
+    if (Number.isFinite(parsed.getTime())) {
+      return parsed.toISOString().slice(0, 10);
+    }
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const millis = value > 10_000_000_000 ? value : value * 1000;
+    const parsed = new Date(millis);
+
+    if (Number.isFinite(parsed.getTime())) {
+      return parsed.toISOString().slice(0, 10);
+    }
+  }
+
+  return null;
+}
+
+function pickDate(record, fallbackDate) {
+  for (const key of ["date", "timestamp", "createdAt", "created_at", "startedAt", "started_at", "current_date"]) {
+    const date = dateFromValue(record[key]);
+
+    if (date) {
+      return date;
+    }
+  }
+
+  return fallbackDate;
+}
+
+function pickModel(record, fallbackModel) {
+  for (const key of ["model", "modelId", "model_id", "modelName", "model_name"]) {
+    const value = record[key];
+
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return fallbackModel;
+}
+
+function usageFromRecord(record) {
+  const input = sumNumbers(record, [
+    "input",
+    "inputTokens",
+    "input_tokens",
+    "prompt_tokens",
+    "promptTokenCount",
+    "prompt_token_count",
+    "tokensIn",
+    "tokens_in",
+  ]);
+  const output = sumNumbers(record, [
+    "output",
+    "outputTokens",
+    "output_tokens",
+    "completion_tokens",
+    "candidatesTokenCount",
+    "candidates_token_count",
+    "reasoning_output_tokens",
+    "reasoningTokens",
+    "reasoning_tokens",
+    "thoughtsTokenCount",
+    "thoughts_tokens",
+    "tokensOut",
+    "tokens_out",
+  ]);
+  const cacheRead = sumNumbers(record, [
+    "cacheRead",
+    "cacheReadTokens",
+    "cache_read_tokens",
+    "cache_read_input_tokens",
+    "cached_tokens",
+    "cached_input_tokens",
+    "cachedContentTokenCount",
+    "cacheReads",
+    "cache_reads",
+  ]);
+  const cacheWrite = sumNumbers(record, [
+    "cacheWrite",
+    "cacheWriteTokens",
+    "cache_write_tokens",
+    "cache_creation_input_tokens",
+    "cacheCreationInputTokens",
+    "cache_creation_tokens",
+    "cacheWrites",
+    "cache_writes",
+  ]);
+  const total = input + output + cacheRead + cacheWrite;
+
+  return total > 0 ? { input, output, cacheRead, cacheWrite, total } : null;
+}
+
+function extractEntriesFromValue(value, tool, fallbackDate) {
+  const entries = [];
+
+  function walk(node, context, keyPath) {
+    if (!node || typeof node !== "object") {
+      return;
+    }
+
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        walk(child, context, keyPath);
+      }
+
+      return;
+    }
+
+    const record = node;
+    const nextContext = {
+      date: pickDate(record, context.date),
+      model: pickModel(record, context.model),
+    };
+    const leafKey = keyPath.at(-1) ?? "";
+
+    // Codex and several tools keep cumulative totals beside per-call usage.
+    // Upload only local deltas when both are present.
+    if (!/total_token_usage|totalUsage|aggregate/i.test(leafKey)) {
+      const usage = usageFromRecord(record);
+
+      if (usage && nextContext.date) {
+        entries.push({
+          date: nextContext.date,
+          tool,
+          model: nextContext.model || "unknown",
+          ...usage,
+        });
+      }
+    }
+
+    for (const [key, child] of Object.entries(record)) {
+      if (child && typeof child === "object") {
+        walk(child, nextContext, [...keyPath, key]);
+      }
+    }
+  }
+
+  walk(value, { date: fallbackDate, model: null }, []);
+
+  return entries;
+}
+
+async function pathExists(file) {
+  try {
+    return await stat(file);
+  } catch {
+    return null;
+  }
+}
+
+function isScannableFile(file) {
+  return (
+    file.endsWith(".json") ||
+    file.endsWith(".jsonl") ||
+    file.endsWith(".db") ||
+    file.endsWith(".sqlite")
+  );
+}
+
+async function collectFiles(root, maxFiles = 1000) {
+  const rootStat = await pathExists(root);
+
+  if (!rootStat) {
+    return [];
+  }
+
+  if (rootStat.isFile()) {
+    return isScannableFile(root) ? [root] : [];
+  }
+
+  const files = [];
+  const queue = [root];
+
+  while (queue.length && files.length < maxFiles) {
+    const current = queue.shift();
+    let entries;
+
+    try {
+      entries = await readdir(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      const fullPath = path.join(current, entry.name);
+
+      if (entry.isDirectory()) {
+        queue.push(fullPath);
+      } else if (entry.isFile() && isScannableFile(fullPath)) {
+        files.push(fullPath);
+
+        if (files.length >= maxFiles) {
+          break;
+        }
+      }
+    }
+  }
+
+  return files;
+}
+
+async function readUsageFile(file, tool) {
+  const fileStat = await stat(file);
+  const fallbackDate = fileStat.mtime.toISOString().slice(0, 10);
+
+  if (file.endsWith(".db") || file.endsWith(".sqlite")) {
+    return readSqliteUsage(file, tool, fallbackDate);
+  }
+
+  const text = await readFile(file, "utf8");
+
+  if (file.endsWith(".jsonl")) {
+    const entries = [];
+
+    for (const line of text.split("\n")) {
+      const trimmed = line.trim();
+
+      if (!trimmed) {
+        continue;
+      }
+
+      try {
+        entries.push(...extractEntriesFromValue(JSON.parse(trimmed), tool, fallbackDate));
+      } catch {
+        continue;
+      }
+    }
+
+    return entries;
+  }
+
+  try {
+    return extractEntriesFromValue(JSON.parse(text), tool, fallbackDate);
+  } catch {
+    return [];
+  }
+}
+
+function quoteSqlIdent(identifier) {
+  return `"${identifier.replaceAll('"', '""')}"`;
+}
+
+async function sqliteJson(file, sql) {
+  try {
+    const { stdout } = await execFileAsync("sqlite3", ["-readonly", "-json", file, sql], {
+      maxBuffer: 1024 * 1024 * 20,
+    });
+
+    return stdout.trim() ? JSON.parse(stdout) : [];
+  } catch {
+    return [];
+  }
+}
+
+function firstColumn(columns, names) {
+  return names.find((name) => columns.has(name)) ?? null;
+}
+
+function sumSqlExpr(columns, names) {
+  const existing = names.filter((name) => columns.has(name));
+
+  if (!existing.length) {
+    return "0";
+  }
+
+  return existing.map((name) => `coalesce(${quoteSqlIdent(name)}, 0)`).join(" + ");
+}
+
+async function readSqliteUsage(file, tool, fallbackDate) {
+  const tables = await sqliteJson(
+    file,
+    "select name from sqlite_master where type = 'table' and name not like 'sqlite_%'",
+  );
+  const entries = [];
+
+  for (const table of tables) {
+    const tableName = typeof table.name === "string" ? table.name : "";
+
+    if (!tableName) {
+      continue;
+    }
+
+    const columnRows = await sqliteJson(file, `pragma table_info(${quoteSqlIdent(tableName)})`);
+    const columns = new Set(
+      columnRows.map((column) => column.name).filter((name) => typeof name === "string"),
+    );
+    const inputExpr = sumSqlExpr(columns, [
+      "input",
+      "inputTokens",
+      "input_tokens",
+      "prompt_tokens",
+      "promptTokenCount",
+      "tokensIn",
+    ]);
+    const outputExpr = sumSqlExpr(columns, [
+      "output",
+      "outputTokens",
+      "output_tokens",
+      "completion_tokens",
+      "candidatesTokenCount",
+      "reasoning_output_tokens",
+      "thoughts_tokens",
+      "tokensOut",
+    ]);
+    const cacheReadExpr = sumSqlExpr(columns, [
+      "cacheRead",
+      "cacheReadTokens",
+      "cache_read_tokens",
+      "cache_read_input_tokens",
+      "cached_tokens",
+      "cached_input_tokens",
+      "cacheReads",
+    ]);
+    const cacheWriteExpr = sumSqlExpr(columns, [
+      "cacheWrite",
+      "cacheWriteTokens",
+      "cache_write_tokens",
+      "cache_creation_input_tokens",
+      "cacheWrites",
+    ]);
+    const tokenExpr = `${inputExpr} + ${outputExpr} + ${cacheReadExpr} + ${cacheWriteExpr}`;
+
+    if (tokenExpr === "0 + 0 + 0 + 0") {
+      continue;
+    }
+
+    const dateColumn = firstColumn(columns, [
+      "date",
+      "timestamp",
+      "createdAt",
+      "created_at",
+      "startedAt",
+      "started_at",
+    ]);
+    const modelColumn = firstColumn(columns, ["model", "modelId", "model_id", "modelName", "model_name"]);
+    const dateSelect = dateColumn ? quoteSqlIdent(dateColumn) : "null";
+    const modelSelect = modelColumn ? quoteSqlIdent(modelColumn) : "'unknown'";
+    const rows = await sqliteJson(
+      file,
+      [
+        "select",
+        `${dateSelect} as timestamp,`,
+        `${modelSelect} as model,`,
+        `${inputExpr} as input,`,
+        `${outputExpr} as output,`,
+        `${cacheReadExpr} as cacheRead,`,
+        `${cacheWriteExpr} as cacheWrite`,
+        `from ${quoteSqlIdent(tableName)}`,
+        `where (${tokenExpr}) > 0`,
+        "limit 10000",
+      ].join(" "),
+    );
+
+    for (const row of rows) {
+      const date = pickDate(row, fallbackDate);
+      const model = pickModel(row, "unknown") || "unknown";
+      const input = readNumber(row, ["input"]);
+      const output = readNumber(row, ["output"]);
+      const cacheRead = readNumber(row, ["cacheRead"]);
+      const cacheWrite = readNumber(row, ["cacheWrite"]);
+      const total = input + output + cacheRead + cacheWrite;
+
+      if (date && total > 0) {
+        entries.push({ date, tool, model, input, output, cacheRead, cacheWrite, total });
+      }
+    }
+  }
+
+  return entries;
+}
+
+function aggregateEntries(entries) {
+  const rows = new Map();
+
+  for (const entry of entries.map(normalizeEntry)) {
+    const key = `${entry.date}\u0000${entry.tool}\u0000${entry.model}`;
+    const current =
+      rows.get(key) ?? {
+        ...entry,
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 0,
+      };
+
+    current.input += entry.input;
+    current.output += entry.output;
+    current.cacheRead += entry.cacheRead;
+    current.cacheWrite += entry.cacheWrite;
+    current.total += entry.total;
+    rows.set(key, current);
+  }
+
+  return [...rows.values()].sort((a, b) => {
+    const dateOrder = a.date.localeCompare(b.date);
+
+    if (dateOrder) {
+      return dateOrder;
+    }
+
+    const toolOrder = TOOL_KEYS.indexOf(a.tool) - TOOL_KEYS.indexOf(b.tool);
+
+    if (toolOrder) {
+      return toolOrder;
+    }
+
+    return a.model.localeCompare(b.model);
+  });
+}
+
+function getOption(args, name, shortName = null) {
+  const index = args.findIndex((arg) => arg === name || (shortName && arg === shortName));
+
+  if (index === -1) {
+    return null;
+  }
+
+  const value = args[index + 1];
+
+  if (!value || value.startsWith("-")) {
+    throw new Error(`缺少 ${name} 参数值。`);
+  }
+
+  return value;
+}
+
+function getScanOptions(args) {
+  const tool = getOption(args, "--tool");
+  const since = getOption(args, "--since");
+
+  if (tool && !TOOL_KEYS.includes(tool)) {
+    throw new Error(`不支持的工具: ${tool}`);
+  }
+
+  if (since && !isIsoCalendarDate(since)) {
+    throw new Error("--since 必须是 YYYY-MM-DD。");
+  }
+
+  return { tool, since };
+}
+
+async function scanLocalUsage(args) {
+  const { tool, since } = getScanOptions(args);
+  const entries = [];
+
+  for (const source of sourceDefinitions()) {
+    if (tool && source.tool !== tool) {
+      continue;
+    }
+
+    for (const root of source.roots) {
+      const files = await collectFiles(root);
+
+      for (const file of files) {
+        entries.push(...(await readUsageFile(file, source.tool)));
+      }
+    }
+  }
+
+  return aggregateEntries(since ? entries.filter((entry) => entry.date >= since) : entries);
+}
+
+function printSources() {
+  for (const source of sourceDefinitions()) {
+    const roots = source.roots.map((root) => root.replace(homedir(), "~")).join(", ");
+    console.log(`${source.tool}\t${source.label}\t${roots}`);
+  }
+}
+
+function getEntriesInput(raw) {
+  if (Array.isArray(raw)) {
+    return raw;
+  }
+
+  if (raw && typeof raw === "object" && Array.isArray(raw.entries)) {
+    return raw.entries;
+  }
+
+  throw new Error("usage JSON 必须是数组，或包含 entries 数组。");
+}
+
+function buildUploadPayload(raw) {
+  const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  const entries = getEntriesInput(raw).map(normalizeEntry);
+
+  return {
+    deviceId: typeof source.deviceId === "string" && source.deviceId.trim() ? source.deviceId.trim() : getDeviceId(),
+    clientVersion: typeof source.clientVersion === "string" && source.clientVersion.trim() ? source.clientVersion.trim() : clientVersion,
+    timezone: typeof source.timezone === "string" && source.timezone.trim() ? source.timezone.trim() : getTimezone(),
+    generatedAt: typeof source.generatedAt === "string" && source.generatedAt.trim() ? source.generatedAt.trim() : new Date().toISOString(),
+    entries,
+  };
+}
+
+function getFileArg(args) {
+  const index = args.findIndex((arg) => arg === "--file" || arg === "-f");
+
+  if (index === -1) {
+    return null;
+  }
+
+  const file = args[index + 1];
+
+  if (!file || file.startsWith("-")) {
+    throw new Error("缺少 --file 后面的 usage.json 路径。");
+  }
+
+  return file;
+}
+
+async function upload(args) {
+  const config = await readConfig();
+  const webhookUrl = requireWebhookUrl(config.webhookUrl);
+  const file = getFileArg(args);
+  const raw = file
+    ? JSON.parse(await readFile(file, "utf8"))
+    : { entries: await scanLocalUsage(args) };
+  const payload = buildUploadPayload(raw);
+  const batches = payload.entries.length
+    ? Array.from({ length: Math.ceil(payload.entries.length / 500) }, (_, index) => ({
+        ...payload,
+        entries: payload.entries.slice(index * 500, index * 500 + 500),
+      }))
+    : [payload];
+
+  for (const batch of batches) {
+    const response = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(batch),
+    });
+    const responseText = await response.text();
+    let responseJson = null;
+
+    try {
+      responseJson = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      responseJson = null;
+    }
+
+    if (!response.ok || responseJson?.status !== 0) {
+      const error = responseJson?.error || responseText || `HTTP ${response.status}`;
+      throw new Error(`上传失败: ${error}`);
+    }
+  }
+
+  console.log(`上传成功: ${payload.entries.length} 条`);
+}
+
+function parseInterval(args) {
+  const raw = getOption(args, "--interval");
+
+  if (!raw) {
+    return 300;
+  }
+
+  const interval = Number(raw);
+
+  if (!Number.isSafeInteger(interval) || interval < 60) {
+    throw new Error("--interval 必须是不小于 60 的整数秒。");
+  }
+
+  return interval;
+}
+
+function servicePaths() {
+  if (process.platform === "darwin") {
+    return {
+      kind: "launchd",
+      file: path.join(homedir(), "Library", "LaunchAgents", "com.tokenrank.collector.plist"),
+    };
+  }
+
+  return {
+    kind: "systemd",
+    file: path.join(homedir(), ".config", "systemd", "user", "tokenrank-collector.service"),
+  };
+}
+
+function xmlEscape(value) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function launchdPlist(interval) {
+  const binPath = fileURLToPath(import.meta.url);
+  const logDir = path.join(homedir(), ".tokenrank");
+  const args = [process.execPath, binPath, "daemon", "--once"];
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.tokenrank.collector</string>
+  <key>ProgramArguments</key>
+  <array>
+${args.map((arg) => `    <string>${xmlEscape(arg)}</string>`).join("\n")}
+  </array>
+  <key>StartInterval</key>
+  <integer>${interval}</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>${xmlEscape(path.join(logDir, "collector.log"))}</string>
+  <key>StandardErrorPath</key>
+  <string>${xmlEscape(path.join(logDir, "collector.err.log"))}</string>
+</dict>
+</plist>
+`;
+}
+
+function systemdUnit(interval) {
+  const binPath = fileURLToPath(import.meta.url);
+
+  return `[Unit]
+Description=TokenRank collector
+
+[Service]
+Type=simple
+ExecStart=${process.execPath} ${binPath} daemon --interval ${interval}
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target
+`;
+}
+
+async function runOptional(command, args) {
+  try {
+    await execFileAsync(command, args);
+  } catch {
+    // The service file is still useful even when launchd/systemd registration
+    // is unavailable, for example inside CI or restricted shells.
+  }
+}
+
+async function installService(args) {
+  await readConfig();
+  const interval = parseInterval(args);
+  const { kind, file } = servicePaths();
+  await mkdir(path.dirname(file), { recursive: true });
+  await mkdir(path.join(homedir(), ".tokenrank"), { recursive: true, mode: 0o700 });
+  await writeFile(file, kind === "launchd" ? launchdPlist(interval) : systemdUnit(interval));
+
+  if (!process.env.TOKENRANK_SERVICE_NO_REGISTER) {
+    if (kind === "launchd") {
+      await runOptional("launchctl", ["unload", file]);
+      await runOptional("launchctl", ["load", file]);
+    } else {
+      await runOptional("systemctl", ["--user", "daemon-reload"]);
+      await runOptional("systemctl", ["--user", "enable", "--now", "tokenrank-collector.service"]);
+    }
+  }
+
+  console.log(`已安装后台服务: ${file}`);
+}
+
+async function serviceStatus() {
+  const { file } = servicePaths();
+  const installed = Boolean(await pathExists(file));
+  console.log(installed ? `已安装: ${file}` : "未安装");
+}
+
+async function uninstallService() {
+  const { kind, file } = servicePaths();
+
+  if (!process.env.TOKENRANK_SERVICE_NO_REGISTER) {
+    if (kind === "launchd") {
+      await runOptional("launchctl", ["unload", file]);
+    } else {
+      await runOptional("systemctl", ["--user", "disable", "--now", "tokenrank-collector.service"]);
+      await runOptional("systemctl", ["--user", "daemon-reload"]);
+    }
+  }
+
+  await rm(file, { force: true });
+  console.log(`已卸载后台服务: ${file}`);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function daemon(args) {
+  if (args.includes("--once")) {
+    await upload(args);
+    return;
+  }
+
+  const interval = parseInterval(args);
+
+  for (;;) {
+    await upload(args);
+    await sleep(interval * 1000);
+  }
+}
+
+async function preview(args) {
+  const entries = await scanLocalUsage(args);
+  const payload = buildUploadPayload({ entries });
+
+  if (args.includes("--json")) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  if (!entries.length) {
+    console.log("没有发现可上传的本地 token 统计。");
+    return;
+  }
+
+  for (const entry of entries) {
+    console.log(`${entry.date}\t${entry.tool}\t${entry.model}\t${entry.total}`);
+  }
+}
+
+async function main() {
+  const [command, ...args] = process.argv.slice(2);
+
+  switch (command) {
+    case "tools":
+      console.log(TOOL_KEYS.join("\n"));
+      return;
+    case "sources":
+      printSources();
+      return;
+    case "preview":
+      await preview(args);
+      return;
+    case "connect": {
+      const webhookUrl = requireWebhookUrl(args[0]);
+      await writeConfig({ webhookUrl, connectedAt: new Date().toISOString() });
+      console.log("已保存 webhook。");
+      return;
+    }
+    case "logout":
+      await removeConfig();
+      return;
+    case "upload":
+      await upload(args);
+      return;
+    case "daemon":
+      await daemon(args);
+      return;
+    case "service":
+      if (args[0] === "install") {
+        await installService(args.slice(1));
+        return;
+      }
+
+      if (args[0] === "status") {
+        await serviceStatus();
+        return;
+      }
+
+      if (args[0] === "uninstall") {
+        await uninstallService();
+        return;
+      }
+
+      throw new Error("未知 service 命令。");
+    case undefined:
+    case "-h":
+    case "--help":
+    case "help":
+      console.log(usage());
+      return;
+    default:
+      throw new Error(`未知命令: ${command}\n\n${usage()}`);
+  }
+}
+
+main().catch((error) => {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+});
