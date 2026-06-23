@@ -26,6 +26,7 @@ const TOOL_KEYS = [
   "qwen",
   "codex-cache",
 ];
+const CACHE_INCLUDED_INPUT_TOOLS = new Set(["codex"]);
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageJson = JSON.parse(await readFile(path.join(rootDir, "package.json"), "utf8"));
@@ -251,6 +252,22 @@ function readNumber(record, keys) {
   return readOptionalNumber(record, keys) ?? 0;
 }
 
+function inputIncludesCacheRead(tool) {
+  return CACHE_INCLUDED_INPUT_TOOLS.has(tool);
+}
+
+function canonicalTotalFor(tool, input, output, cacheRead, cacheWrite) {
+  if (inputIncludesCacheRead(tool)) {
+    return input + output;
+  }
+
+  return input + output + cacheRead + cacheWrite;
+}
+
+function legacySummedTotal(input, output, cacheRead, cacheWrite) {
+  return input + output + cacheRead + cacheWrite;
+}
+
 function isIsoCalendarDate(value) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     return false;
@@ -287,11 +304,13 @@ function normalizeEntry(rawEntry) {
   const output = readNumber(entry, ["output", "outputTokens"]);
   const cacheRead = readNumber(entry, ["cacheRead", "cacheReadTokens"]);
   const cacheWrite = readNumber(entry, ["cacheWrite", "cacheWriteTokens"]);
-  const inferredTotal = input + output + cacheRead + cacheWrite;
-  const total = readOptionalNumber(entry, ["total", "totalTokens"]) ?? inferredTotal;
+  const inferredTotal = canonicalTotalFor(tool, input, output, cacheRead, cacheWrite);
+  const legacyTotal = legacySummedTotal(input, output, cacheRead, cacheWrite);
+  const providedTotal = readOptionalNumber(entry, ["total", "totalTokens"]);
+  const total = providedTotal ?? inferredTotal;
 
-  if (total !== inferredTotal) {
-    throw new Error("total 必须等于 input + output + cacheRead + cacheWrite。");
+  if (total !== inferredTotal && total !== legacyTotal) {
+    throw new Error("total 必须匹配该工具的 Token 统计口径。");
   }
 
   return {
@@ -302,7 +321,7 @@ function normalizeEntry(rawEntry) {
     output,
     cacheRead,
     cacheWrite,
-    total,
+    total: inferredTotal,
   };
 }
 
@@ -355,8 +374,8 @@ function pickModel(record, fallbackModel) {
   return fallbackModel;
 }
 
-function usageFromRecord(record) {
-  const input = sumNumbers(record, [
+function usageFromRecord(record, tool) {
+  const input = readNumber(record, [
     "input",
     "inputTokens",
     "input_tokens",
@@ -366,21 +385,24 @@ function usageFromRecord(record) {
     "tokensIn",
     "tokens_in",
   ]);
-  const output = sumNumbers(record, [
+  const aggregateOutput = readOptionalNumber(record, [
     "output",
     "outputTokens",
     "output_tokens",
     "completion_tokens",
     "candidatesTokenCount",
     "candidates_token_count",
+    "tokensOut",
+    "tokens_out",
+  ]);
+  const detailOutput = sumNumbers(record, [
     "reasoning_output_tokens",
     "reasoningTokens",
     "reasoning_tokens",
     "thoughtsTokenCount",
     "thoughts_tokens",
-    "tokensOut",
-    "tokens_out",
   ]);
+  const output = aggregateOutput ?? detailOutput;
   const cacheRead = sumNumbers(record, [
     "cacheRead",
     "cacheReadTokens",
@@ -402,9 +424,13 @@ function usageFromRecord(record) {
     "cacheWrites",
     "cache_writes",
   ]);
-  const total = input + output + cacheRead + cacheWrite;
+  const total =
+    readOptionalNumber(record, ["total", "totalTokens", "total_tokens"]) ??
+    canonicalTotalFor(tool, input, output, cacheRead, cacheWrite);
 
-  return total > 0 ? { input, output, cacheRead, cacheWrite, total } : null;
+  const observedTokens = input + output + cacheRead + cacheWrite;
+
+  return total > 0 && observedTokens > 0 ? { input, output, cacheRead, cacheWrite, total } : null;
 }
 
 function extractEntriesFromValue(value, tool, fallbackDate) {
@@ -433,7 +459,7 @@ function extractEntriesFromValue(value, tool, fallbackDate) {
     // Codex and several tools keep cumulative totals beside per-call usage.
     // Upload only local deltas when both are present.
     if (!/total_token_usage|totalUsage|aggregate/i.test(leafKey)) {
-      const usage = usageFromRecord(record);
+      const usage = usageFromRecord(record, tool);
 
       if (usage && nextContext.date) {
         entries.push({
@@ -675,7 +701,7 @@ async function readSqliteUsage(file, tool, fallbackDate) {
       const output = readNumber(row, ["output"]);
       const cacheRead = readNumber(row, ["cacheRead"]);
       const cacheWrite = readNumber(row, ["cacheWrite"]);
-      const total = input + output + cacheRead + cacheWrite;
+      const total = canonicalTotalFor(tool, input, output, cacheRead, cacheWrite);
 
       if (date && total > 0) {
         entries.push({ date, tool, model, input, output, cacheRead, cacheWrite, total });
