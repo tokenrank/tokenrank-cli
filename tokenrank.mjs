@@ -31,10 +31,28 @@ const TOOL_KEYS = [
 ];
 const CACHE_INCLUDED_INPUT_TOOLS = new Set(["codex"]);
 
-const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const packageJson = JSON.parse(await readFile(path.join(rootDir, "package.json"), "utf8"));
+const cliDir = path.dirname(fileURLToPath(import.meta.url));
+const packageJson = await readCliPackageJson([
+  path.join(cliDir, "package.json"),
+  path.resolve(cliDir, "..", "package.json"),
+  path.join(process.env.TOKENRANK_HOME ?? path.join(homedir(), ".tokenrank"), "package.json"),
+]);
 const clientVersion = String(packageJson.version ?? "0.0.0");
 const defaultCollectorIntervalSeconds = 12 * 60 * 60;
+
+async function readCliPackageJson(candidates) {
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(await readFile(candidate, "utf8"));
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
+
+  return {};
+}
 
 function usage() {
   return [
