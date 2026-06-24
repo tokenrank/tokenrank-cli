@@ -34,6 +34,7 @@ const CACHE_INCLUDED_INPUT_TOOLS = new Set(["codex"]);
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageJson = JSON.parse(await readFile(path.join(rootDir, "package.json"), "utf8"));
 const clientVersion = String(packageJson.version ?? "0.0.0");
+const defaultCollectorIntervalSeconds = 12 * 60 * 60;
 
 function usage() {
   return [
@@ -1175,7 +1176,7 @@ function parseInterval(args) {
   const raw = getOption(args, "--interval");
 
   if (!raw) {
-    return 300;
+    return defaultCollectorIntervalSeconds;
   }
 
   const interval = Number(raw);
