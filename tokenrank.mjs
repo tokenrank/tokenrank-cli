@@ -2,8 +2,11 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { homedir, hostname } from "node:os";
 import path from "node:path";
+import { connect as tlsConnect } from "node:tls";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
@@ -836,6 +839,287 @@ function buildUploadPayload(raw) {
   };
 }
 
+function firstProxyValue(names) {
+  for (const name of names) {
+    const value = process.env[name];
+
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return null;
+}
+
+function normalizeProxyUrl(value) {
+  const proxyUrl = value.includes("://") ? new URL(value) : new URL(`http://${value}`);
+
+  if (proxyUrl.protocol !== "http:" && proxyUrl.protocol !== "https:") {
+    return null;
+  }
+
+  return proxyUrl;
+}
+
+function proxyPort(proxyUrl) {
+  if (proxyUrl.port) {
+    return Number(proxyUrl.port);
+  }
+
+  return proxyUrl.protocol === "https:" ? 443 : 80;
+}
+
+function shouldBypassProxy(hostnameValue) {
+  const host = hostnameValue.toLowerCase();
+
+  return host === "localhost" || host === "127.0.0.1" || host === "::1";
+}
+
+function explicitProxyFor(targetUrl) {
+  const protocolNames =
+    targetUrl.protocol === "https:"
+      ? ["TOKENRANK_HTTPS_PROXY", "HTTPS_PROXY", "https_proxy"]
+      : ["TOKENRANK_HTTP_PROXY", "HTTP_PROXY", "http_proxy"];
+  const value = firstProxyValue([
+    "TOKENRANK_PROXY",
+    ...protocolNames,
+    "ALL_PROXY",
+    "all_proxy",
+  ]);
+
+  return value ? normalizeProxyUrl(value) : null;
+}
+
+function parseMacSystemProxy(output, targetUrl) {
+  const entries = Object.fromEntries(
+    output
+      .split("\n")
+      .map((line) => line.match(/^\s*([A-Za-z]+(?:Enable|Proxy|Port))\s*:\s*(.+?)\s*$/))
+      .filter(Boolean)
+      .map((match) => [match[1], match[2]]),
+  );
+  const prefix = targetUrl.protocol === "https:" ? "HTTPS" : "HTTP";
+
+  if (entries[`${prefix}Enable`] !== "1" || !entries[`${prefix}Proxy`] || !entries[`${prefix}Port`]) {
+    return null;
+  }
+
+  return normalizeProxyUrl(`http://${entries[`${prefix}Proxy`]}:${entries[`${prefix}Port`]}`);
+}
+
+async function systemProxyFor(targetUrl) {
+  if (process.env.TOKENRANK_TEST_SYSTEM_PROXY) {
+    return normalizeProxyUrl(process.env.TOKENRANK_TEST_SYSTEM_PROXY);
+  }
+
+  if (process.env.TOKENRANK_DISABLE_SYSTEM_PROXY === "1" || process.platform !== "darwin") {
+    return null;
+  }
+
+  try {
+    const { stdout } = await execFileAsync("scutil", ["--proxy"]);
+    return parseMacSystemProxy(stdout, targetUrl);
+  } catch {
+    return null;
+  }
+}
+
+async function proxyFor(targetUrl) {
+  if (shouldBypassProxy(targetUrl.hostname)) {
+    return null;
+  }
+
+  return explicitProxyFor(targetUrl) ?? (await systemProxyFor(targetUrl));
+}
+
+function responseFromNode(res) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+
+    res.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    res.on("end", () => {
+      const status = res.statusCode ?? 0;
+
+      resolve({
+        ok: status >= 200 && status < 300,
+        status,
+        text: async () => Buffer.concat(chunks).toString("utf8"),
+      });
+    });
+    res.on("error", reject);
+  });
+}
+
+function bufferIndexOf(buffer, needle, start = 0) {
+  return buffer.indexOf(Buffer.from(needle), start);
+}
+
+function decodeChunkedBody(buffer) {
+  const chunks = [];
+  let offset = 0;
+
+  for (;;) {
+    const lineEnd = bufferIndexOf(buffer, "\r\n", offset);
+
+    if (lineEnd === -1) {
+      return buffer;
+    }
+
+    const sizeText = buffer.subarray(offset, lineEnd).toString("ascii").split(";", 1)[0];
+    const size = Number.parseInt(sizeText, 16);
+
+    if (!Number.isFinite(size)) {
+      return buffer;
+    }
+
+    offset = lineEnd + 2;
+
+    if (size === 0) {
+      return Buffer.concat(chunks);
+    }
+
+    chunks.push(buffer.subarray(offset, offset + size));
+    offset += size + 2;
+  }
+}
+
+function responseFromRawHttp(buffer) {
+  const headerEnd = bufferIndexOf(buffer, "\r\n\r\n");
+
+  if (headerEnd === -1) {
+    throw new Error("代理响应格式不正确。");
+  }
+
+  const headerText = buffer.subarray(0, headerEnd).toString("ascii");
+  const status = Number(headerText.match(/^HTTP\/\d(?:\.\d)?\s+(\d+)/)?.[1] ?? 0);
+  const isChunked = /\r\ntransfer-encoding:\s*chunked\b/i.test(headerText);
+  const body = buffer.subarray(headerEnd + 4);
+  const responseBody = isChunked ? decodeChunkedBody(body) : body;
+
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => responseBody.toString("utf8"),
+  };
+}
+
+function requestViaHttpProxy(targetUrl, proxyUrl, body, headers) {
+  return new Promise((resolve, reject) => {
+    const request = (proxyUrl.protocol === "https:" ? httpsRequest : httpRequest)(
+      {
+        protocol: proxyUrl.protocol,
+        hostname: proxyUrl.hostname,
+        port: proxyPort(proxyUrl),
+        method: "POST",
+        path: targetUrl.href,
+        headers: {
+          ...headers,
+          host: targetUrl.host,
+        },
+      },
+      (res) => {
+        responseFromNode(res).then(resolve, reject);
+      },
+    );
+
+    request.on("error", reject);
+    request.end(body);
+  });
+}
+
+function requestViaHttpsProxy(targetUrl, proxyUrl, body) {
+  return new Promise((resolve, reject) => {
+    const targetPort = Number(targetUrl.port || 443);
+    const proxyRequest = (proxyUrl.protocol === "https:" ? httpsRequest : httpRequest)({
+      protocol: proxyUrl.protocol,
+      hostname: proxyUrl.hostname,
+      port: proxyPort(proxyUrl),
+      method: "CONNECT",
+      path: `${targetUrl.hostname}:${targetPort}`,
+      headers: {
+        host: `${targetUrl.hostname}:${targetPort}`,
+      },
+    });
+
+    proxyRequest.on("connect", (res, socket) => {
+      if ((res.statusCode ?? 0) < 200 || (res.statusCode ?? 0) >= 300) {
+        socket.destroy();
+        reject(new Error(`代理连接失败: HTTP ${res.statusCode ?? 0}`));
+        return;
+      }
+
+      const tlsSocket = tlsConnect({
+        socket,
+        servername: targetUrl.hostname,
+        rejectUnauthorized: process.env.NODE_TLS_REJECT_UNAUTHORIZED === "0" ? false : undefined,
+      });
+      tlsSocket.once("error", reject);
+      tlsSocket.once("secureConnect", () => {
+        const responseChunks = [];
+        let settled = false;
+        const settle = () => {
+          if (settled) {
+            return;
+          }
+
+          settled = true;
+          try {
+            resolve(responseFromRawHttp(Buffer.concat(responseChunks)));
+          } catch (error) {
+            reject(error);
+          }
+        };
+
+        tlsSocket.on("data", (chunk) => responseChunks.push(Buffer.from(chunk)));
+        tlsSocket.once("end", settle);
+        tlsSocket.once("close", settle);
+        tlsSocket.write(
+          [
+            `POST ${targetUrl.pathname}${targetUrl.search} HTTP/1.1`,
+            `Host: ${targetUrl.host}`,
+            "Content-Type: application/json",
+            `Content-Length: ${Buffer.byteLength(body)}`,
+            "Connection: close",
+            "",
+            body,
+          ].join("\r\n"),
+        );
+      });
+    });
+    proxyRequest.on("error", reject);
+    proxyRequest.end();
+  });
+}
+
+async function postJson(webhookUrl, payload) {
+  const body = JSON.stringify(payload);
+  const targetUrl = new URL(webhookUrl);
+  const headers = {
+    "content-type": "application/json",
+    "content-length": String(Buffer.byteLength(body)),
+    connection: "close",
+  };
+  const proxyUrl = await proxyFor(targetUrl);
+
+  if (!proxyUrl) {
+    return fetch(webhookUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    });
+  }
+
+  if (targetUrl.protocol === "http:") {
+    return requestViaHttpProxy(targetUrl, proxyUrl, body, headers);
+  }
+
+  if (targetUrl.protocol === "https:") {
+    return requestViaHttpsProxy(targetUrl, proxyUrl, body);
+  }
+
+  throw new Error(`不支持的 webhook 协议: ${targetUrl.protocol}`);
+}
+
 function getFileArg(args) {
   const index = args.findIndex((arg) => arg === "--file" || arg === "-f");
 
@@ -868,11 +1152,7 @@ async function upload(args) {
     : [payload];
 
   for (const batch of batches) {
-    const response = await fetch(webhookUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(batch),
-    });
+    const response = await postJson(webhookUrl, batch);
     const responseText = await response.text();
     let responseJson = null;
 
