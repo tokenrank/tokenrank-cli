@@ -908,10 +908,20 @@ function parseInterval(args) {
 }
 
 function servicePaths() {
-  if (process.platform === "darwin") {
+  const platform = process.env.TOKENRANK_TEST_PLATFORM || process.platform;
+
+  if (platform === "darwin") {
     return {
       kind: "launchd",
       file: path.join(homedir(), "Library", "LaunchAgents", "com.tokenrank.collector.plist"),
+    };
+  }
+
+  if (platform === "win32") {
+    return {
+      kind: "schtasks",
+      file: path.join(homedir(), ".tokenrank", "tokenrank-collector.cmd"),
+      taskName: "TokenRankCollector",
     };
   }
 
@@ -974,6 +984,16 @@ WantedBy=default.target
 `;
 }
 
+function cmdQuote(value) {
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
+function windowsTaskRunner() {
+  const binPath = fileURLToPath(import.meta.url);
+
+  return `@echo off\r\n${cmdQuote(process.execPath)} ${cmdQuote(binPath)} daemon --once\r\n`;
+}
+
 async function runOptional(command, args) {
   try {
     await execFileAsync(command, args);
@@ -989,12 +1009,29 @@ async function installService(args) {
   const { kind, file } = servicePaths();
   await mkdir(path.dirname(file), { recursive: true });
   await mkdir(path.join(homedir(), ".tokenrank"), { recursive: true, mode: 0o700 });
-  await writeFile(file, kind === "launchd" ? launchdPlist(interval) : systemdUnit(interval));
+  await writeFile(
+    file,
+    kind === "launchd" ? launchdPlist(interval) : kind === "schtasks" ? windowsTaskRunner() : systemdUnit(interval),
+  );
 
   if (!process.env.TOKENRANK_SERVICE_NO_REGISTER) {
     if (kind === "launchd") {
       await runOptional("launchctl", ["unload", file]);
       await runOptional("launchctl", ["load", file]);
+    } else if (kind === "schtasks") {
+      const minutes = Math.max(1, Math.ceil(interval / 60));
+      await runOptional("schtasks.exe", [
+        "/Create",
+        "/TN",
+        "TokenRankCollector",
+        "/SC",
+        "MINUTE",
+        "/MO",
+        String(minutes),
+        "/TR",
+        file,
+        "/F",
+      ]);
     } else {
       await runOptional("systemctl", ["--user", "daemon-reload"]);
       await runOptional("systemctl", ["--user", "enable", "--now", "tokenrank-collector.service"]);
@@ -1016,6 +1053,8 @@ async function uninstallService() {
   if (!process.env.TOKENRANK_SERVICE_NO_REGISTER) {
     if (kind === "launchd") {
       await runOptional("launchctl", ["unload", file]);
+    } else if (kind === "schtasks") {
+      await runOptional("schtasks.exe", ["/Delete", "/TN", "TokenRankCollector", "/F"]);
     } else {
       await runOptional("systemctl", ["--user", "disable", "--now", "tokenrank-collector.service"]);
       await runOptional("systemctl", ["--user", "daemon-reload"]);
