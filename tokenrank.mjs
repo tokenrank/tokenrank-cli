@@ -40,6 +40,7 @@ const packageJson = await readCliPackageJson([
 const clientVersion = String(packageJson.version ?? "0.0.0");
 const defaultCollectorIntervalSeconds = 12 * 60 * 60;
 const collectorScheduleHours = [0, 12];
+const collectorScheduleLabel = "每天 12:00 和 24:00";
 
 async function readCliPackageJson(candidates) {
   for (const candidate of candidates) {
@@ -1324,8 +1325,10 @@ async function runOptional(command, args) {
   }
 }
 
-async function installService() {
+async function installService(args = []) {
   await readConfig();
+  const hasLegacyIntervalArg =
+    args.includes("--interval") || args.some((arg) => arg.startsWith("--interval="));
   const { kind, file, timerFile, taskNames = [], legacyTaskName } = servicePaths();
   await mkdir(path.dirname(file), { recursive: true });
   await mkdir(path.join(homedir(), ".tokenrank"), { recursive: true, mode: 0o700 });
@@ -1378,7 +1381,11 @@ async function installService() {
     }
   }
 
+  if (hasLegacyIntervalArg) {
+    console.log(`已忽略 --interval：后台采集时间固定为${collectorScheduleLabel}。`);
+  }
   console.log(`已安装后台服务: ${file}`);
+  console.log(`采集时间: ${collectorScheduleLabel}`);
 }
 
 async function serviceStatus() {
