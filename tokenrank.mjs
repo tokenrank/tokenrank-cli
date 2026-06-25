@@ -39,6 +39,7 @@ const packageJson = await readCliPackageJson([
 ]);
 const clientVersion = String(packageJson.version ?? "0.0.0");
 const defaultCollectorIntervalSeconds = 12 * 60 * 60;
+const collectorScheduleHours = [0, 12];
 
 async function readCliPackageJson(candidates) {
   for (const candidate of candidates) {
@@ -66,7 +67,7 @@ function usage() {
     "  tokenrank logout",
     "  tokenrank upload [--file usage.json] [--tool tool-id] [--since YYYY-MM-DD]",
     "  tokenrank daemon [--interval seconds] [--once]",
-    "  tokenrank service install [--interval seconds]",
+    "  tokenrank service install",
     "  tokenrank service status",
     "  tokenrank service uninstall",
     "",
@@ -1220,13 +1221,15 @@ function servicePaths() {
     return {
       kind: "schtasks",
       file: path.join(homedir(), ".tokenrank", "tokenrank-collector.cmd"),
-      taskName: "TokenRankCollector",
+      taskNames: ["TokenRankCollectorMidnight", "TokenRankCollectorNoon"],
+      legacyTaskName: "TokenRankCollector",
     };
   }
 
   return {
     kind: "systemd",
     file: path.join(homedir(), ".config", "systemd", "user", "tokenrank-collector.service"),
+    timerFile: path.join(homedir(), ".config", "systemd", "user", "tokenrank-collector.timer"),
   };
 }
 
@@ -1238,10 +1241,20 @@ function xmlEscape(value) {
     .replaceAll('"', "&quot;");
 }
 
-function launchdPlist(interval) {
+function launchdPlist() {
   const binPath = fileURLToPath(import.meta.url);
   const logDir = path.join(homedir(), ".tokenrank");
   const args = [process.execPath, binPath, "daemon", "--once"];
+  const schedule = collectorScheduleHours
+    .map(
+      (hour) => `    <dict>
+      <key>Hour</key>
+      <integer>${hour}</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>`,
+    )
+    .join("\n");
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1253,10 +1266,10 @@ function launchdPlist(interval) {
   <array>
 ${args.map((arg) => `    <string>${xmlEscape(arg)}</string>`).join("\n")}
   </array>
-  <key>StartInterval</key>
-  <integer>${interval}</integer>
-  <key>RunAtLoad</key>
-  <true/>
+  <key>StartCalendarInterval</key>
+  <array>
+${schedule}
+  </array>
   <key>StandardOutPath</key>
   <string>${xmlEscape(path.join(logDir, "collector.log"))}</string>
   <key>StandardErrorPath</key>
@@ -1266,20 +1279,29 @@ ${args.map((arg) => `    <string>${xmlEscape(arg)}</string>`).join("\n")}
 `;
 }
 
-function systemdUnit(interval) {
+function systemdUnit() {
   const binPath = fileURLToPath(import.meta.url);
 
   return `[Unit]
 Description=TokenRank collector
 
 [Service]
-Type=simple
-ExecStart=${process.execPath} ${binPath} daemon --interval ${interval}
-Restart=always
-RestartSec=30
+Type=oneshot
+ExecStart=${process.execPath} ${binPath} daemon --once
+`;
+}
+
+function systemdTimer() {
+  return `[Unit]
+Description=Run TokenRank collector at 00:00 and 12:00
+
+[Timer]
+OnCalendar=*-*-* 00:00:00
+OnCalendar=*-*-* 12:00:00
+Persistent=true
 
 [Install]
-WantedBy=default.target
+WantedBy=timers.target
 `;
 }
 
@@ -1302,38 +1324,57 @@ async function runOptional(command, args) {
   }
 }
 
-async function installService(args) {
+async function installService() {
   await readConfig();
-  const interval = parseInterval(args);
-  const { kind, file } = servicePaths();
+  const { kind, file, timerFile, taskNames = [], legacyTaskName } = servicePaths();
   await mkdir(path.dirname(file), { recursive: true });
   await mkdir(path.join(homedir(), ".tokenrank"), { recursive: true, mode: 0o700 });
   await writeFile(
     file,
-    kind === "launchd" ? launchdPlist(interval) : kind === "schtasks" ? windowsTaskRunner() : systemdUnit(interval),
+    kind === "launchd" ? launchdPlist() : kind === "schtasks" ? windowsTaskRunner() : systemdUnit(),
   );
+  if (timerFile) {
+    await writeFile(timerFile, systemdTimer());
+  }
 
   if (!process.env.TOKENRANK_SERVICE_NO_REGISTER) {
     if (kind === "launchd") {
       await runOptional("launchctl", ["unload", file]);
       await runOptional("launchctl", ["load", file]);
     } else if (kind === "schtasks") {
-      const minutes = Math.max(1, Math.ceil(interval / 60));
+      if (legacyTaskName) {
+        await runOptional("schtasks.exe", ["/Delete", "/TN", legacyTaskName, "/F"]);
+      }
+      for (const taskName of taskNames) {
+        await runOptional("schtasks.exe", ["/Delete", "/TN", taskName, "/F"]);
+      }
       await runOptional("schtasks.exe", [
         "/Create",
         "/TN",
-        "TokenRankCollector",
+        "TokenRankCollectorMidnight",
         "/SC",
-        "MINUTE",
-        "/MO",
-        String(minutes),
+        "DAILY",
+        "/ST",
+        "00:00",
+        "/TR",
+        file,
+        "/F",
+      ]);
+      await runOptional("schtasks.exe", [
+        "/Create",
+        "/TN",
+        "TokenRankCollectorNoon",
+        "/SC",
+        "DAILY",
+        "/ST",
+        "12:00",
         "/TR",
         file,
         "/F",
       ]);
     } else {
       await runOptional("systemctl", ["--user", "daemon-reload"]);
-      await runOptional("systemctl", ["--user", "enable", "--now", "tokenrank-collector.service"]);
+      await runOptional("systemctl", ["--user", "enable", "--now", "tokenrank-collector.timer"]);
     }
   }
 
@@ -1341,26 +1382,34 @@ async function installService(args) {
 }
 
 async function serviceStatus() {
-  const { file } = servicePaths();
-  const installed = Boolean(await pathExists(file));
+  const { file, timerFile } = servicePaths();
+  const installed = Boolean(await pathExists(file)) && (!timerFile || Boolean(await pathExists(timerFile)));
   console.log(installed ? `已安装: ${file}` : "未安装");
 }
 
 async function uninstallService() {
-  const { kind, file } = servicePaths();
+  const { kind, file, timerFile, taskNames = [], legacyTaskName } = servicePaths();
 
   if (!process.env.TOKENRANK_SERVICE_NO_REGISTER) {
     if (kind === "launchd") {
       await runOptional("launchctl", ["unload", file]);
     } else if (kind === "schtasks") {
-      await runOptional("schtasks.exe", ["/Delete", "/TN", "TokenRankCollector", "/F"]);
+      if (legacyTaskName) {
+        await runOptional("schtasks.exe", ["/Delete", "/TN", legacyTaskName, "/F"]);
+      }
+      for (const taskName of taskNames) {
+        await runOptional("schtasks.exe", ["/Delete", "/TN", taskName, "/F"]);
+      }
     } else {
-      await runOptional("systemctl", ["--user", "disable", "--now", "tokenrank-collector.service"]);
+      await runOptional("systemctl", ["--user", "disable", "--now", "tokenrank-collector.timer"]);
       await runOptional("systemctl", ["--user", "daemon-reload"]);
     }
   }
 
   await rm(file, { force: true });
+  if (timerFile) {
+    await rm(timerFile, { force: true });
+  }
   console.log(`已卸载后台服务: ${file}`);
 }
 
