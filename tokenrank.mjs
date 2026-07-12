@@ -76,10 +76,6 @@ const cliPalette = {
 };
 let sectionIndex = 0;
 
-function color(code, value) {
-  return useColor ? `\x1b[${code}m${value}\x1b[0m` : value;
-}
-
 function fitLine(value, width) {
   const chars = [...value];
   return chars.length > width ? chars.slice(0, width).join("") : value.padEnd(width, " ");
@@ -171,7 +167,7 @@ function printSuccess(label, detail = "") {
 }
 
 function printMuted(label) {
-  console.log(color("38;5;244", label));
+  console.log(trueColor(label, cliPalette.muted));
 }
 
 async function renderUploadGrid(completed, total) {
@@ -2337,7 +2333,7 @@ async function main() {
       await printLogo();
       printSection("SUPPORTED TOOLS");
       for (const tool of TOOL_KEYS) {
-        console.log(`${color("38;5;48;1", "•")} ${tool}`);
+        console.log(`${trueColor("•", cliPalette.lime)} ${tool}`);
       }
       return;
     case "sources":
