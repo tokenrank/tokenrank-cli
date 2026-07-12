@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { homedir, hostname } from "node:os";
@@ -11,6 +11,8 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 const execFileAsync = promisify(execFile);
+let nodeSqliteModule = null;
+let nodeSqliteLoaded = false;
 
 const TOOL_KEYS = [
   "codex",
@@ -28,8 +30,25 @@ const TOOL_KEYS = [
   "roo-code",
   "qwen",
   "codex-cache",
+  "cursor",
+  "github-copilot",
+  "continue",
 ];
 const CACHE_INCLUDED_INPUT_TOOLS = new Set(["codex"]);
+
+function unattributedModelForTool(tool) {
+  return `${tool}-unattributed`;
+}
+
+function isUnknownModel(value) {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return !normalized || normalized === "unknown" || normalized === "undefined" || normalized === "null";
+}
+
+function normalizeModel(value, tool) {
+  const model = typeof value === "string" ? value.trim() : "";
+  return isUnknownModel(model) ? unattributedModelForTool(tool) : model;
+}
 
 const cliDir = path.dirname(fileURLToPath(import.meta.url));
 const packageJson = await readCliPackageJson([
@@ -41,6 +60,182 @@ const clientVersion = String(packageJson.version ?? "0.0.0");
 const defaultCollectorIntervalSeconds = 12 * 60 * 60;
 const collectorScheduleHours = [0, 12];
 const collectorScheduleLabel = "每天 12:00 和 24:00";
+const terminalIsTty = process.env.TOKENRANK_TEST_TTY === "1" || Boolean(process.stdout.isTTY);
+const terminalColumns = Math.max(40, Number(process.env.COLUMNS || process.stdout.columns || 80));
+const useColor = process.env.NO_COLOR !== "1" && terminalIsTty;
+const useAnimation = useColor && process.env.TOKENRANK_NO_ANIMATION !== "1";
+
+function color(code, value) {
+  return useColor ? `\x1b[${code}m${value}\x1b[0m` : value;
+}
+
+function fitLine(value, width) {
+  const chars = [...value];
+  return chars.length > width ? chars.slice(0, width).join("") : value.padEnd(width, " ");
+}
+
+function centerLine(value, width) {
+  const length = [...value].length;
+  if (length >= width) {
+    return [...value].slice(0, width).join("");
+  }
+
+  const left = Math.floor((width - length) / 2);
+  return `${" ".repeat(left)}${value}${" ".repeat(width - length - left)}`;
+}
+
+function neonBlock(value, foreground, background) {
+  if (!useColor) {
+    return value;
+  }
+
+  return `\x1b[48;2;${background.join(";")}m\x1b[38;2;${foreground.join(";")}m${value}\x1b[0m`;
+}
+
+function logo() {
+  const width = Math.min(terminalColumns, 104);
+  const compact = width < 72;
+  const art = compact
+    ? [
+        "████  TOKENRANK  ████",
+        "◢██◣  NEON TOKEN GRID  ◢██◣",
+      ]
+    : [
+        "████████╗ ██████╗ ██╗  ██╗███████╗███╗   ██╗██████╗  █████╗ ███╗   ██╗██╗  ██╗",
+        "╚══██╔══╝██╔═══██╗██║ ██╔╝██╔════╝████╗  ██║██╔══██╗██╔══██╗████╗  ██║██║ ██╔╝",
+        "   ██║   ██║   ██║█████╔╝ █████╗  ██╔██╗ ██║██████╔╝███████║██╔██╗ ██║█████╔╝ ",
+        "   ██║   ╚██████╔╝██║  ██╗███████╗██║ ╚████║██║  ██║██║  ██║██║ ╚████║██║  ██╗",
+      ];
+  const palettes = [
+    { foreground: [7, 12, 24], background: [36, 255, 184] },
+    { foreground: [6, 10, 26], background: [0, 218, 255] },
+    { foreground: [255, 255, 255], background: [105, 48, 255] },
+    { foreground: [255, 255, 255], background: [255, 37, 141] },
+  ];
+  const lines = [
+    neonBlock(fitLine("  TOKENRANK // LIVE GRID", width), [7, 12, 24], [255, 190, 36]),
+    ...art.map((line, index) => {
+      const palette = palettes[index % palettes.length];
+      return neonBlock(centerLine(line, width), palette.foreground, palette.background);
+    }),
+    neonBlock(
+      fitLine("  PRIVATE AGGREGATES  ◈  FAIR TOKEN TELEMETRY  ◈  ONLINE", width),
+      [222, 255, 247],
+      [15, 24, 45],
+    ),
+  ];
+
+  return lines.join("\n");
+}
+
+async function printLogo() {
+  if (process.env.TOKENRANK_NO_LOGO === "1") {
+    return;
+  }
+
+  if (useAnimation) {
+    const frames = ["▰▱▱▱▱▱", "▰▰▰▱▱▱", "▰▰▰▰▰▰"];
+    for (const [index, frame] of frames.entries()) {
+      const pulse = neonBlock(
+        fitLine(`  ${frame}  BOOTING TOKEN GRID ${String(index + 1).padStart(2, "0")}/03`, Math.min(terminalColumns, 64)),
+        [7, 12, 24],
+        index === 2 ? [36, 255, 184] : [105, 48, 255],
+      );
+      process.stdout.write(`\r${pulse}`);
+      await sleep(70);
+    }
+    process.stdout.write("\r\x1b[2K");
+  }
+
+  console.log(logo());
+}
+
+function printSection(title) {
+  console.log("");
+  if (terminalIsTty) {
+    const width = Math.min(terminalColumns, 104);
+    console.log(neonBlock(fitLine(`  ${title.toUpperCase()}  ━━━━━━━━━━━━━━━━━━━━━`, width), [255, 255, 255], [58, 24, 120]));
+  } else {
+    console.log(color("1", `== ${title} ==`));
+  }
+}
+
+function printStep(label, detail = "") {
+  if (terminalIsTty) {
+    const width = Math.min(terminalColumns, 104);
+    console.log(
+      neonBlock(
+        fitLine(`  ▰ ${label}${detail ? `  ${detail}` : ""}`, width),
+        [220, 255, 248],
+        [12, 55, 76],
+      ),
+    );
+  } else {
+    console.log(`${color("38;5;48;1", "->")} ${label}${detail ? color("38;5;244", ` ${detail}`) : ""}`);
+  }
+}
+
+function printSuccess(label, detail = "") {
+  if (terminalIsTty) {
+    const width = Math.min(terminalColumns, 104);
+    console.log(
+      neonBlock(
+        fitLine(`  ✓ ${label}${detail ? `  ·  ${detail}` : ""}`, width),
+        [7, 12, 24],
+        [36, 255, 184],
+      ),
+    );
+  } else {
+    console.log(`${color("38;5;48;1", "OK")} ${label}${detail ? color("38;5;244", ` ${detail}`) : ""}`);
+  }
+}
+
+function printMuted(label) {
+  console.log(color("38;5;244", label));
+}
+
+async function renderUploadGrid(completed, total) {
+  if (!terminalIsTty) {
+    return;
+  }
+
+  const width = Math.min(terminalColumns, 104);
+  const barWidth = Math.max(10, Math.min(42, width - 34));
+  const filled = Math.round((completed / total) * barWidth);
+  const baseBar = `${"█".repeat(filled)}${"░".repeat(barWidth - filled)}`;
+  const frames = useAnimation && total <= 4 ? 3 : 1;
+
+  for (let frame = 0; frame < frames; frame += 1) {
+    const spark = frames > 1 ? ["◢", "◆", "◣"][frame] : "◆";
+    const line = fitLine(
+      `  ${spark} UPLOAD GRID  [${baseBar}]  ${completed}/${total}`,
+      width,
+    );
+    const rendered = neonBlock(
+      line,
+      [255, 255, 255],
+      frame === frames - 1 ? [255, 37, 141] : [105, 48, 255],
+    );
+
+    if (frames > 1) {
+      process.stdout.write(`\r${rendered}`);
+      await sleep(45);
+    } else {
+      console.log(rendered);
+    }
+  }
+
+  if (frames > 1) {
+    process.stdout.write("\r\x1b[2K");
+    console.log(
+      neonBlock(
+        fitLine(`  ◆ UPLOAD GRID  [${baseBar}]  ${completed}/${total}`, width),
+        [255, 255, 255],
+        [255, 37, 141],
+      ),
+    );
+  }
+}
 
 async function readCliPackageJson(candidates) {
   for (const candidate of candidates) {
@@ -63,6 +258,8 @@ function usage() {
     "Commands:",
     "  tokenrank tools",
     "  tokenrank sources",
+    "  tokenrank status",
+    "  tokenrank doctor",
     "  tokenrank preview [--json] [--tool tool-id] [--since YYYY-MM-DD]",
     "  tokenrank connect <webhook-url>",
     "  tokenrank logout",
@@ -78,9 +275,18 @@ function usage() {
 
 function sourceDefinitions() {
   const home = homedir();
+  const platform = process.env.TOKENRANK_TEST_PLATFORM || process.platform;
   const appSupport = path.join(home, "Library", "Application Support");
-  const codeStorage = path.join(appSupport, "Code", "User", "globalStorage");
-  const cursorStorage = path.join(appSupport, "Cursor", "User", "globalStorage");
+  const editorData =
+    platform === "win32"
+      ? process.env.APPDATA ?? path.join(home, "AppData", "Roaming")
+      : platform === "darwin"
+        ? appSupport
+        : process.env.XDG_CONFIG_HOME ?? path.join(home, ".config");
+  const codeStorage = path.join(editorData, "Code", "User", "globalStorage");
+  const cursorStorage = path.join(editorData, "Cursor", "User", "globalStorage");
+  const codeLogs = path.join(editorData, "Code", "logs");
+  const cursorLogs = path.join(editorData, "Cursor", "logs");
   const xdgData = process.env.XDG_DATA_HOME ?? path.join(home, ".local", "share");
 
   return [
@@ -177,11 +383,151 @@ function sourceDefinitions() {
       label: "Codex Cache",
       roots: [path.join(process.env.CODEX_HOME ?? path.join(home, ".codex"), "cache")],
     },
+    {
+      tool: "cursor",
+      label: "Cursor",
+      roots: [
+        path.join(home, ".tokenrank", "imports", "cursor-usage.json"),
+        path.join(home, ".cursor", "usage"),
+      ],
+      priority: 300,
+    },
+    {
+      tool: "github-copilot",
+      label: "GitHub Copilot",
+      roots: [
+        path.join(home, ".copilot", "logs"),
+        path.join(home, ".copilot", "telemetry"),
+        codeLogs,
+        cursorLogs,
+      ],
+      priority: 250,
+      includeLogs: true,
+      includeFile: (file) =>
+        file.includes(`${path.sep}.copilot${path.sep}`) || /github[.-]copilot/i.test(file),
+    },
+    {
+      tool: "continue",
+      label: "Continue",
+      roots: [path.join(home, ".continue", "sessions")],
+      priority: 250,
+    },
   ];
 }
 
 function configPath() {
   return process.env.TOKENRANK_CONFIG ?? path.join(homedir(), ".tokenrank", "config.json");
+}
+
+function serviceStatePath() {
+  return path.join(homedir(), ".tokenrank", "service-state.json");
+}
+
+function collectorLockPath() {
+  return path.join(homedir(), ".tokenrank", "collector.lock");
+}
+
+function currentTime() {
+  const configured = process.env.TOKENRANK_NOW;
+  const value = configured ? new Date(configured) : new Date();
+
+  if (!Number.isFinite(value.getTime())) {
+    throw new Error("TOKENRANK_NOW 必须是有效时间。");
+  }
+
+  return value;
+}
+
+function latestScheduleBoundary(now = currentTime()) {
+  const boundary = new Date(now);
+  boundary.setMinutes(0, 0, 0);
+  boundary.setHours(now.getHours() >= 12 ? 12 : 0);
+  return boundary;
+}
+
+async function readServiceState() {
+  try {
+    return JSON.parse(await readFile(serviceStatePath(), "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT" || error instanceof SyntaxError) {
+      return {};
+    }
+
+    throw error;
+  }
+}
+
+async function writeServiceState(state) {
+  const file = serviceStatePath();
+  const temporary = `${file}.${process.pid}.tmp`;
+  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+  await rename(temporary, file);
+}
+
+async function recordSuccessfulLocalUpload(now = currentTime()) {
+  const state = await readServiceState();
+  await writeServiceState({
+    ...state,
+    lastAttemptAt: now.toISOString(),
+    lastSuccessfulAt: now.toISOString(),
+    lastScheduledBoundary: latestScheduleBoundary(now).toISOString(),
+    lastErrorCode: null,
+  });
+}
+
+async function collectorLockIsStale(file) {
+  try {
+    const lock = JSON.parse(await readFile(file, "utf8"));
+    const createdAt = new Date(lock.createdAt).getTime();
+    const expired = !Number.isFinite(createdAt) || currentTime().getTime() - createdAt > 2 * 60 * 60 * 1000;
+
+    if (expired) {
+      return true;
+    }
+
+    if (!Number.isSafeInteger(lock.pid) || lock.pid <= 0) {
+      return true;
+    }
+
+    try {
+      process.kill(lock.pid, 0);
+      return false;
+    } catch (error) {
+      return error?.code === "ESRCH";
+    }
+  } catch {
+    return true;
+  }
+}
+
+async function withCollectorLock(operation) {
+  const file = collectorLockPath();
+  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+
+  try {
+    await writeFile(file, `${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })}\n`, {
+      flag: "wx",
+      mode: 0o600,
+    });
+  } catch (error) {
+    if (error?.code === "EEXIST") {
+      if (await collectorLockIsStale(file)) {
+        await rm(file, { force: true });
+        return withCollectorLock(operation);
+      }
+
+      return { skipped: true, reason: "locked" };
+    }
+
+    throw error;
+  }
+
+  try {
+    return await operation();
+  } finally {
+    await rm(file, { force: true });
+  }
 }
 
 async function readConfig() {
@@ -323,7 +669,7 @@ function normalizeEntry(rawEntry) {
     throw new Error(`不支持的工具: ${tool || "(empty)"}`);
   }
 
-  const model = typeof entry.model === "string" && entry.model.trim() ? entry.model.trim() : "unknown";
+  const model = normalizeModel(entry.model, tool);
   const input = readNumber(entry, ["input", "inputTokens"]);
   const output = readNumber(entry, ["output", "outputTokens"]);
   const cacheRead = readNumber(entry, ["cacheRead", "cacheReadTokens"]);
@@ -349,6 +695,13 @@ function normalizeEntry(rawEntry) {
   };
 }
 
+function localCalendarDate(parsed) {
+  const year = parsed.getFullYear();
+  const month = String(parsed.getMonth() + 1).padStart(2, "0");
+  const day = String(parsed.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function dateFromValue(value) {
   if (typeof value === "string") {
     if (isIsoCalendarDate(value)) {
@@ -358,7 +711,7 @@ function dateFromValue(value) {
     const parsed = new Date(value);
 
     if (Number.isFinite(parsed.getTime())) {
-      return parsed.toISOString().slice(0, 10);
+      return localCalendarDate(parsed);
     }
   }
 
@@ -367,7 +720,7 @@ function dateFromValue(value) {
     const parsed = new Date(millis);
 
     if (Number.isFinite(parsed.getTime())) {
-      return parsed.toISOString().slice(0, 10);
+      return localCalendarDate(parsed);
     }
   }
 
@@ -396,6 +749,38 @@ function pickModel(record, fallbackModel) {
   }
 
   return fallbackModel;
+}
+
+function pickProviderEventId(record, fallbackId = null) {
+  for (const key of [
+    "providerEventId",
+    "provider_event_id",
+    "requestId",
+    "request_id",
+    "eventId",
+    "event_id",
+    "id",
+  ]) {
+    const value = record[key];
+
+    if ((typeof value === "string" || typeof value === "number") && String(value).trim()) {
+      return String(value).trim();
+    }
+  }
+
+  return fallbackId;
+}
+
+function pickOccurredAt(record, fallbackValue = null) {
+  for (const key of ["timestamp", "createdAt", "created_at", "startedAt", "started_at", "date"]) {
+    const value = record[key];
+
+    if (typeof value === "string" || typeof value === "number") {
+      return String(value);
+    }
+  }
+
+  return fallbackValue;
 }
 
 function usageFromRecord(record, tool) {
@@ -448,16 +833,13 @@ function usageFromRecord(record, tool) {
     "cacheWrites",
     "cache_writes",
   ]);
-  const total =
-    readOptionalNumber(record, ["total", "totalTokens", "total_tokens"]) ??
-    canonicalTotalFor(tool, input, output, cacheRead, cacheWrite);
-
+  const total = canonicalTotalFor(tool, input, output, cacheRead, cacheWrite);
   const observedTokens = input + output + cacheRead + cacheWrite;
 
   return total > 0 && observedTokens > 0 ? { input, output, cacheRead, cacheWrite, total } : null;
 }
 
-function extractEntriesFromValue(value, tool, fallbackDate) {
+function extractEntriesFromValue(value, tool, fallbackDate, baseContext = {}) {
   const entries = [];
 
   function walk(node, context, keyPath) {
@@ -477,6 +859,8 @@ function extractEntriesFromValue(value, tool, fallbackDate) {
     const nextContext = {
       date: pickDate(record, context.date),
       model: pickModel(record, context.model),
+      providerEventId: pickProviderEventId(record, context.providerEventId),
+      occurredAt: pickOccurredAt(record, context.occurredAt),
     };
     const leafKey = keyPath.at(-1) ?? "";
 
@@ -489,7 +873,9 @@ function extractEntriesFromValue(value, tool, fallbackDate) {
         entries.push({
           date: nextContext.date,
           tool,
-          model: nextContext.model || "unknown",
+          model: normalizeModel(nextContext.model, tool),
+          providerEventId: nextContext.providerEventId,
+          occurredAt: nextContext.occurredAt,
           ...usage,
         });
       }
@@ -502,9 +888,157 @@ function extractEntriesFromValue(value, tool, fallbackDate) {
     }
   }
 
-  walk(value, { date: fallbackDate, model: null }, []);
+  walk(
+    value,
+    {
+      date: baseContext.date ?? fallbackDate,
+      model: baseContext.model ?? null,
+      providerEventId: baseContext.providerEventId ?? null,
+      occurredAt: baseContext.occurredAt ?? null,
+    },
+    [],
+  );
 
   return entries;
+}
+
+function otelAttribute(attributes, key) {
+  if (!Array.isArray(attributes)) {
+    return null;
+  }
+
+  const attribute = attributes.find((item) => item?.key === key);
+  const value = attribute?.value;
+
+  if (typeof value === "string" || typeof value === "number") {
+    return value;
+  }
+
+  for (const field of ["stringValue", "intValue", "doubleValue"]) {
+    if (typeof value?.[field] === "string" || typeof value?.[field] === "number") {
+      return value[field];
+    }
+  }
+
+  return null;
+}
+
+function dateFromUnixNano(value, fallbackDate) {
+  try {
+    const milliseconds = Number(BigInt(String(value)) / 1_000_000n);
+    const parsed = new Date(milliseconds);
+    return Number.isFinite(parsed.getTime()) ? localCalendarDate(parsed) : fallbackDate;
+  } catch {
+    return fallbackDate;
+  }
+}
+
+function extractCopilotOtelEntries(value, fallbackDate) {
+  const entries = [];
+  let sequence = 0;
+
+  function walk(node) {
+    if (!node || typeof node !== "object") {
+      return;
+    }
+
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        walk(child);
+      }
+      return;
+    }
+
+    if (node.name === "gen_ai.client.token.usage") {
+      const points = node.data?.dataPoints ?? node.dataPoints ?? [];
+
+      for (const point of points) {
+        const tokenType = String(otelAttribute(point.attributes, "gen_ai.token.type") ?? "");
+        const amount = Number(point.sum ?? point.value ?? point.asInt ?? 0);
+
+        if ((tokenType !== "input" && tokenType !== "output") || !Number.isSafeInteger(amount) || amount <= 0) {
+          continue;
+        }
+
+        const model = String(
+          otelAttribute(point.attributes, "gen_ai.request.model") ??
+            otelAttribute(point.attributes, "gen_ai.response.model") ??
+            unattributedModelForTool("github-copilot"),
+        );
+        const occurredAt = String(point.timeUnixNano ?? point.startTimeUnixNano ?? "");
+        const input = tokenType === "input" ? amount : 0;
+        const output = tokenType === "output" ? amount : 0;
+        entries.push({
+          date: dateFromUnixNano(occurredAt, fallbackDate),
+          tool: "github-copilot",
+          model: normalizeModel(model, "github-copilot"),
+          input,
+          output,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: input + output,
+          occurredAt,
+          providerEventId: `otel:${occurredAt}:${model}:${tokenType}:${sequence}`,
+        });
+        sequence += 1;
+      }
+    }
+
+    for (const child of Object.values(node)) {
+      if (child && typeof child === "object") {
+        walk(child);
+      }
+    }
+  }
+
+  walk(value);
+  return entries;
+}
+
+function extractContextFromValue(value, baseContext) {
+  const nextContext = {
+    date: baseContext.date,
+    model: baseContext.model,
+  };
+
+  function walk(node, context) {
+    if (!node || typeof node !== "object") {
+      return;
+    }
+
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        walk(child, context);
+      }
+
+      return;
+    }
+
+    const record = node;
+    const date = pickDate(record, context.date);
+    const model = pickModel(record, context.model);
+    const providerEventId = pickProviderEventId(record, context.providerEventId);
+    const occurredAt = pickOccurredAt(record, context.occurredAt);
+    const childContext = { date, model, providerEventId, occurredAt };
+
+    if (date) {
+      nextContext.date = date;
+    }
+
+    if (model) {
+      nextContext.model = model;
+    }
+
+    for (const child of Object.values(record)) {
+      if (child && typeof child === "object") {
+        walk(child, childContext);
+      }
+    }
+  }
+
+  walk(value, baseContext);
+
+  return nextContext;
 }
 
 async function pathExists(file) {
@@ -515,16 +1049,17 @@ async function pathExists(file) {
   }
 }
 
-function isScannableFile(file) {
+function isScannableFile(file, options = {}) {
   return (
     file.endsWith(".json") ||
     file.endsWith(".jsonl") ||
     file.endsWith(".db") ||
-    file.endsWith(".sqlite")
+    file.endsWith(".sqlite") ||
+    (options.includeLogs && file.endsWith(".log"))
   );
 }
 
-async function collectFiles(root, maxFiles = 1000) {
+async function collectFiles(root, maxFiles = 1000, options = {}) {
   const rootStat = await pathExists(root);
 
   if (!rootStat) {
@@ -532,7 +1067,7 @@ async function collectFiles(root, maxFiles = 1000) {
   }
 
   if (rootStat.isFile()) {
-    return isScannableFile(root) ? [root] : [];
+    return isScannableFile(root, options) ? [root] : [];
   }
 
   const files = [];
@@ -553,7 +1088,7 @@ async function collectFiles(root, maxFiles = 1000) {
 
       if (entry.isDirectory()) {
         queue.push(fullPath);
-      } else if (entry.isFile() && isScannableFile(fullPath)) {
+      } else if (entry.isFile() && isScannableFile(fullPath, options)) {
         files.push(fullPath);
 
         if (files.length >= maxFiles) {
@@ -566,18 +1101,28 @@ async function collectFiles(root, maxFiles = 1000) {
   return files;
 }
 
-async function readUsageFile(file, tool) {
+function attachSourceMetadata(entries, file, source) {
+  return entries.map((entry, index) => ({
+    ...entry,
+    sourceId: source.id,
+    sourcePriority: source.priority,
+    sourceRecordId: `${file}:${index}`,
+  }));
+}
+
+async function readUsageFile(file, tool, source = { id: `${tool}-local`, priority: 100 }) {
   const fileStat = await stat(file);
   const fallbackDate = fileStat.mtime.toISOString().slice(0, 10);
 
   if (file.endsWith(".db") || file.endsWith(".sqlite")) {
-    return readSqliteUsage(file, tool, fallbackDate);
+    return attachSourceMetadata(await readSqliteUsage(file, tool, fallbackDate), file, source);
   }
 
   const text = await readFile(file, "utf8");
 
   if (file.endsWith(".jsonl")) {
     const entries = [];
+    let context = { date: fallbackDate, model: null };
 
     for (const line of text.split("\n")) {
       const trimmed = line.trim();
@@ -587,17 +1132,34 @@ async function readUsageFile(file, tool) {
       }
 
       try {
-        entries.push(...extractEntriesFromValue(JSON.parse(trimmed), tool, fallbackDate));
+        const value = JSON.parse(trimmed);
+        const copilotEntries =
+          tool === "github-copilot" ? extractCopilotOtelEntries(value, fallbackDate) : [];
+        entries.push(
+          ...(copilotEntries.length
+            ? copilotEntries
+            : extractEntriesFromValue(value, tool, fallbackDate, context)),
+        );
+        context = extractContextFromValue(value, context);
       } catch {
         continue;
       }
     }
 
-    return entries;
+    return attachSourceMetadata(entries, file, source);
   }
 
   try {
-    return extractEntriesFromValue(JSON.parse(text), tool, fallbackDate);
+    const value = JSON.parse(text);
+    const copilotEntries =
+      tool === "github-copilot" ? extractCopilotOtelEntries(value, fallbackDate) : [];
+    return attachSourceMetadata(
+      copilotEntries.length
+        ? copilotEntries
+        : extractEntriesFromValue(value, tool, fallbackDate),
+      file,
+      source,
+    );
   } catch {
     return [];
   }
@@ -607,7 +1169,64 @@ function quoteSqlIdent(identifier) {
   return `"${identifier.replaceAll('"', '""')}"`;
 }
 
+function quoteSqlString(value) {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+async function loadNodeSqlite() {
+  if (nodeSqliteLoaded) {
+    return nodeSqliteModule;
+  }
+
+  nodeSqliteLoaded = true;
+  const moduleName = "node:sqlite";
+  const originalEmitWarning = process.emitWarning;
+
+  process.emitWarning = (warning, ...args) => {
+    if (args[0] === "ExperimentalWarning" || String(warning).includes("SQLite")) {
+      return;
+    }
+
+    originalEmitWarning.call(process, warning, ...args);
+  };
+
+  try {
+    nodeSqliteModule = await import(moduleName);
+  } catch {
+    nodeSqliteModule = null;
+  } finally {
+    process.emitWarning = originalEmitWarning;
+  }
+
+  return nodeSqliteModule;
+}
+
+async function sqliteJsonViaNode(file, sql) {
+  const sqlite = await loadNodeSqlite();
+
+  if (!sqlite?.DatabaseSync) {
+    return null;
+  }
+
+  let database = null;
+
+  try {
+    database = new sqlite.DatabaseSync(file, { readOnly: true });
+    return database.prepare(sql).all();
+  } catch {
+    return null;
+  } finally {
+    database?.close();
+  }
+}
+
 async function sqliteJson(file, sql) {
+  const nodeRows = await sqliteJsonViaNode(file, sql);
+
+  if (nodeRows) {
+    return nodeRows;
+  }
+
   try {
     const { stdout } = await execFileAsync("sqlite3", ["-readonly", "-json", file, sql], {
       maxBuffer: 1024 * 1024 * 20,
@@ -701,7 +1320,8 @@ async function readSqliteUsage(file, tool, fallbackDate) {
     ]);
     const modelColumn = firstColumn(columns, ["model", "modelId", "model_id", "modelName", "model_name"]);
     const dateSelect = dateColumn ? quoteSqlIdent(dateColumn) : "null";
-    const modelSelect = modelColumn ? quoteSqlIdent(modelColumn) : "'unknown'";
+    const fallbackModel = unattributedModelForTool(tool);
+    const modelSelect = modelColumn ? quoteSqlIdent(modelColumn) : quoteSqlString(fallbackModel);
     const rows = await sqliteJson(
       file,
       [
@@ -720,7 +1340,7 @@ async function readSqliteUsage(file, tool, fallbackDate) {
 
     for (const row of rows) {
       const date = pickDate(row, fallbackDate);
-      const model = pickModel(row, "unknown") || "unknown";
+      const model = normalizeModel(pickModel(row, fallbackModel), tool);
       const input = readNumber(row, ["input"]);
       const output = readNumber(row, ["output"]);
       const cacheRead = readNumber(row, ["cacheRead"]);
@@ -776,6 +1396,38 @@ function aggregateEntries(entries) {
   });
 }
 
+function usageFingerprint(event) {
+  const stable = event.providerEventId
+    ? `${event.tool}\0${event.providerEventId}`
+    : [
+        event.tool,
+        event.occurredAt ?? event.date,
+        event.model,
+        event.input,
+        event.output,
+        event.cacheRead,
+        event.cacheWrite,
+        event.sourceRecordId,
+      ].join("\0");
+
+  return createHash("sha256").update(stable).digest("hex");
+}
+
+function dedupeUsageEvents(events) {
+  const claimed = new Map();
+
+  for (const event of events) {
+    const fingerprint = event.fingerprint ?? usageFingerprint(event);
+    const current = claimed.get(fingerprint);
+
+    if (!current || (event.sourcePriority ?? 0) > (current.sourcePriority ?? 0)) {
+      claimed.set(fingerprint, { ...event, fingerprint });
+    }
+  }
+
+  return [...claimed.values()];
+}
+
 function getOption(args, name, shortName = null) {
   const index = args.findIndex((arg) => arg === name || (shortName && arg === shortName));
 
@@ -807,25 +1459,61 @@ function getScanOptions(args) {
   return { tool, since };
 }
 
-async function scanLocalUsage(args) {
+async function scanLocalUsage(args, options = {}) {
   const { tool, since } = getScanOptions(args);
   const entries = [];
+  const progress = Boolean(options.progress);
+
+  if (progress) {
+    printSection("Scan local usage");
+    printMuted(`scope: ${tool || "all tools"}${since ? ` since ${since}` : ""}`);
+  }
 
   for (const source of sourceDefinitions()) {
     if (tool && source.tool !== tool) {
       continue;
     }
 
+    let sourceFileCount = 0;
+    let sourceEntryCount = 0;
+
+    if (progress) {
+      printStep(`Scanning ${source.label}`, source.tool);
+    }
+
     for (const root of source.roots) {
-      const files = await collectFiles(root);
+      const files = (await collectFiles(root, 1000, { includeLogs: source.includeLogs })).filter(
+        (file) => !source.includeFile || source.includeFile(file),
+      );
+      sourceFileCount += files.length;
 
       for (const file of files) {
-        entries.push(...(await readUsageFile(file, source.tool)));
+        const fileEntries = await readUsageFile(file, source.tool, {
+          id: source.id ?? `${source.tool}-local`,
+          priority: source.priority ?? 100,
+        });
+        sourceEntryCount += fileEntries.length;
+        entries.push(...fileEntries);
       }
+    }
+
+    if (progress) {
+      printMuted(`   ${source.tool}: ${sourceFileCount} files, ${sourceEntryCount} raw rows`);
     }
   }
 
-  return aggregateEntries(since ? entries.filter((entry) => entry.date >= since) : entries);
+  const filteredEntries = since ? entries.filter((entry) => entry.date >= since) : entries;
+  const uniqueEntries = dedupeUsageEvents(filteredEntries);
+  const aggregatedEntries = aggregateEntries(uniqueEntries);
+
+  if (progress) {
+    printSuccess(
+      "Scan complete",
+      `${filteredEntries.length} raw rows -> ${uniqueEntries.length} unique -> ${aggregatedEntries.length} aggregate rows`,
+    );
+  }
+
+  return aggregatedEntries;
 }
 
 function printSources() {
@@ -1157,13 +1845,31 @@ function getFileArg(args) {
   return file;
 }
 
-async function upload(args) {
+function isFullLocalUpload(args, file) {
+  return !file && !getOption(args, "--tool") && !getOption(args, "--since");
+}
+
+async function upload(args, options = {}) {
+  const quiet = Boolean(options.quiet);
+  if (!quiet) {
+    await printLogo();
+    printSection("Upload");
+  }
   const config = await readConfig();
   const webhookUrl = requireWebhookUrl(config.webhookUrl);
   const file = getFileArg(args);
+  if (!quiet) {
+    printStep("Webhook ready", new URL(webhookUrl).origin);
+  }
   const raw = file
     ? JSON.parse(await readFile(file, "utf8"))
-    : { entries: await scanLocalUsage(args) };
+    : { entries: await scanLocalUsage(args, { progress: !quiet }) };
+  if (file && !quiet) {
+    printStep("Loaded usage file", file);
+  }
+  if (!quiet) {
+    printStep("Build payload");
+  }
   const payload = buildUploadPayload(raw);
   const batches = payload.entries.length
     ? Array.from({ length: Math.ceil(payload.entries.length / 500) }, (_, index) => ({
@@ -1172,7 +1878,14 @@ async function upload(args) {
       }))
     : [payload];
 
-  for (const batch of batches) {
+  if (!quiet) {
+    printStep("Uploading", `${payload.entries.length} rows in ${batches.length} batch(es)`);
+  }
+
+  for (const [index, batch] of batches.entries()) {
+    if (!quiet) {
+      printMuted(`   batch ${index + 1}/${batches.length}: ${batch.entries.length} rows`);
+    }
     const response = await postJson(webhookUrl, batch);
     const responseText = await response.text();
     let responseJson = null;
@@ -1187,9 +1900,25 @@ async function upload(args) {
       const error = responseJson?.error || responseText || `HTTP ${response.status}`;
       throw new Error(`上传失败: ${error}`);
     }
+
+    if (!quiet) {
+      await renderUploadGrid(index + 1, batches.length);
+    }
   }
 
-  console.log(`上传成功: ${payload.entries.length} 条`);
+  if (!quiet) {
+    if (terminalIsTty) {
+      printSuccess("GRID SYNCHRONIZED", `${payload.entries.length} rows locked`);
+    } else {
+      printSuccess(`上传成功: ${payload.entries.length} 条`);
+    }
+  }
+
+  if (isFullLocalUpload(args, file) && options.trackState !== false) {
+    await recordSuccessfulLocalUpload();
+  }
+
+  return { uploaded: payload.entries.length };
 }
 
 function parseInterval(args) {
@@ -1221,9 +1950,14 @@ function servicePaths() {
   if (platform === "win32") {
     return {
       kind: "schtasks",
-      file: path.join(homedir(), ".tokenrank", "tokenrank-collector.cmd"),
-      taskNames: ["TokenRankCollectorMidnight", "TokenRankCollectorNoon"],
-      legacyTaskName: "TokenRankCollector",
+      file: path.join(homedir(), ".tokenrank", "tokenrank-collector.ps1"),
+      taskFile: path.join(homedir(), ".tokenrank", "tokenrank-collector.xml"),
+      taskName: "TokenRankCollector",
+      legacyTaskNames: [
+        "TokenRankCollector",
+        "TokenRankCollectorMidnight",
+        "TokenRankCollectorNoon",
+      ],
     };
   }
 
@@ -1245,7 +1979,7 @@ function xmlEscape(value) {
 function launchdPlist() {
   const binPath = fileURLToPath(import.meta.url);
   const logDir = path.join(homedir(), ".tokenrank");
-  const args = [process.execPath, binPath, "daemon", "--once"];
+  const args = [process.execPath, binPath, "daemon", "--once", "--scheduled"];
   const schedule = collectorScheduleHours
     .map(
       (hour) => `    <dict>
@@ -1271,6 +2005,8 @@ ${args.map((arg) => `    <string>${xmlEscape(arg)}</string>`).join("\n")}
   <array>
 ${schedule}
   </array>
+  <key>RunAtLoad</key>
+  <true/>
   <key>StandardOutPath</key>
   <string>${xmlEscape(path.join(logDir, "collector.log"))}</string>
   <key>StandardErrorPath</key>
@@ -1288,7 +2024,7 @@ Description=TokenRank collector
 
 [Service]
 Type=oneshot
-ExecStart=${process.execPath} ${binPath} daemon --once
+ExecStart=${process.execPath} ${binPath} daemon --once --scheduled
 `;
 }
 
@@ -1306,14 +2042,50 @@ WantedBy=timers.target
 `;
 }
 
-function cmdQuote(value) {
-  return `"${value.replaceAll('"', '""')}"`;
+function powershellSingleQuote(value) {
+  return `'${value.replaceAll("'", "''")}'`;
 }
 
 function windowsTaskRunner() {
   const binPath = fileURLToPath(import.meta.url);
+  const logDir = path.join(homedir(), ".tokenrank");
 
-  return `@echo off\r\n${cmdQuote(process.execPath)} ${cmdQuote(binPath)} daemon --once\r\n`;
+  return `$ErrorActionPreference = 'Stop'
+$env:TOKENRANK_NO_LOGO = '1'
+$env:TOKENRANK_NO_ANIMATION = '1'
+& ${powershellSingleQuote(process.execPath)} ${powershellSingleQuote(binPath)} daemon --once --scheduled 1>> ${powershellSingleQuote(path.join(logDir, "collector.log"))} 2>> ${powershellSingleQuote(path.join(logDir, "collector.err.log"))}
+exit $LASTEXITCODE
+`;
+}
+
+function windowsTaskXml(runnerPath) {
+  const userName = [process.env.USERDOMAIN, process.env.USERNAME].filter(Boolean).join("\\") ||
+    process.env.USERNAME ||
+    "SYSTEM";
+  const runnerArgs = `-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "${runnerPath}"`;
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>TokenRank collector at 00:00, 12:00, and after missed runs.</Description></RegistrationInfo>
+  <Triggers>
+    <CalendarTrigger><StartBoundary>2020-01-01T00:00:00</StartBoundary><Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>
+    <CalendarTrigger><StartBoundary>2020-01-01T12:00:00</StartBoundary><Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>
+    <LogonTrigger><Enabled>true</Enabled><UserId>${xmlEscape(userName)}</UserId></LogonTrigger>
+  </Triggers>
+  <Principals><Principal id="Author"><UserId>${xmlEscape(userName)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <Hidden>true</Hidden>
+    <ExecutionTimeLimit>PT2H</ExecutionTimeLimit>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author"><Exec><Command>powershell.exe</Command><Arguments>${xmlEscape(runnerArgs)}</Arguments></Exec></Actions>
+</Task>
+`;
 }
 
 async function runOptional(command, args) {
@@ -1325,11 +2097,38 @@ async function runOptional(command, args) {
   }
 }
 
+async function serviceRegistrationExists() {
+  const { kind, taskName } = servicePaths();
+
+  try {
+    if (kind === "launchd") {
+      const userId = typeof process.getuid === "function" ? process.getuid() : null;
+      const target = userId === null ? "com.tokenrank.collector" : `gui/${userId}/com.tokenrank.collector`;
+      await execFileAsync("launchctl", userId === null ? ["list", target] : ["print", target]);
+    } else if (kind === "schtasks") {
+      await execFileAsync("schtasks.exe", ["/Query", "/TN", taskName]);
+    } else {
+      await execFileAsync("systemctl", ["--user", "is-enabled", "--quiet", "tokenrank-collector.timer"]);
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function installService(args = []) {
   await readConfig();
   const hasLegacyIntervalArg =
     args.includes("--interval") || args.some((arg) => arg.startsWith("--interval="));
-  const { kind, file, timerFile, taskNames = [], legacyTaskName } = servicePaths();
+  const {
+    kind,
+    file,
+    timerFile,
+    taskFile,
+    taskName,
+    legacyTaskNames = [],
+  } = servicePaths();
   await mkdir(path.dirname(file), { recursive: true });
   await mkdir(path.join(homedir(), ".tokenrank"), { recursive: true, mode: 0o700 });
   await writeFile(
@@ -1339,45 +2138,29 @@ async function installService(args = []) {
   if (timerFile) {
     await writeFile(timerFile, systemdTimer());
   }
+  if (taskFile) {
+    await writeFile(taskFile, windowsTaskXml(file));
+  }
 
   if (!process.env.TOKENRANK_SERVICE_NO_REGISTER) {
     if (kind === "launchd") {
       await runOptional("launchctl", ["unload", file]);
-      await runOptional("launchctl", ["load", file]);
+      await execFileAsync("launchctl", ["load", file]);
     } else if (kind === "schtasks") {
-      if (legacyTaskName) {
-        await runOptional("schtasks.exe", ["/Delete", "/TN", legacyTaskName, "/F"]);
+      for (const legacyName of legacyTaskNames) {
+        await runOptional("schtasks.exe", ["/Delete", "/TN", legacyName, "/F"]);
       }
-      for (const taskName of taskNames) {
-        await runOptional("schtasks.exe", ["/Delete", "/TN", taskName, "/F"]);
-      }
-      await runOptional("schtasks.exe", [
+      await execFileAsync("schtasks.exe", [
         "/Create",
         "/TN",
-        "TokenRankCollectorMidnight",
-        "/SC",
-        "DAILY",
-        "/ST",
-        "00:00",
-        "/TR",
-        file,
-        "/F",
-      ]);
-      await runOptional("schtasks.exe", [
-        "/Create",
-        "/TN",
-        "TokenRankCollectorNoon",
-        "/SC",
-        "DAILY",
-        "/ST",
-        "12:00",
-        "/TR",
-        file,
+        taskName,
+        "/XML",
+        taskFile,
         "/F",
       ]);
     } else {
-      await runOptional("systemctl", ["--user", "daemon-reload"]);
-      await runOptional("systemctl", ["--user", "enable", "--now", "tokenrank-collector.timer"]);
+      await execFileAsync("systemctl", ["--user", "daemon-reload"]);
+      await execFileAsync("systemctl", ["--user", "enable", "--now", "tokenrank-collector.timer"]);
     }
   }
 
@@ -1389,23 +2172,38 @@ async function installService(args = []) {
 }
 
 async function serviceStatus() {
-  const { file, timerFile } = servicePaths();
-  const installed = Boolean(await pathExists(file)) && (!timerFile || Boolean(await pathExists(timerFile)));
+  const { file } = servicePaths();
+  const installed = await serviceInstalled();
   console.log(installed ? `已安装: ${file}` : "未安装");
 }
 
+async function serviceInstalled() {
+  const { file, timerFile, taskFile } = servicePaths();
+  const configExists =
+    Boolean(await pathExists(file)) &&
+    (!timerFile || Boolean(await pathExists(timerFile))) &&
+    (!taskFile || Boolean(await pathExists(taskFile)));
+
+  if (!configExists) {
+    return false;
+  }
+
+  if (process.env.TOKENRANK_SERVICE_NO_REGISTER) {
+    return true;
+  }
+
+  return serviceRegistrationExists();
+}
+
 async function uninstallService() {
-  const { kind, file, timerFile, taskNames = [], legacyTaskName } = servicePaths();
+  const { kind, file, timerFile, taskFile, legacyTaskNames = [] } = servicePaths();
 
   if (!process.env.TOKENRANK_SERVICE_NO_REGISTER) {
     if (kind === "launchd") {
       await runOptional("launchctl", ["unload", file]);
     } else if (kind === "schtasks") {
-      if (legacyTaskName) {
-        await runOptional("schtasks.exe", ["/Delete", "/TN", legacyTaskName, "/F"]);
-      }
-      for (const taskName of taskNames) {
-        await runOptional("schtasks.exe", ["/Delete", "/TN", taskName, "/F"]);
+      for (const legacyName of legacyTaskNames) {
+        await runOptional("schtasks.exe", ["/Delete", "/TN", legacyName, "/F"]);
       }
     } else {
       await runOptional("systemctl", ["--user", "disable", "--now", "tokenrank-collector.timer"]);
@@ -1417,16 +2215,132 @@ async function uninstallService() {
   if (timerFile) {
     await rm(timerFile, { force: true });
   }
+  if (taskFile) {
+    await rm(taskFile, { force: true });
+  }
   console.log(`已卸载后台服务: ${file}`);
+}
+
+function nextScheduleBoundary(now = currentTime()) {
+  const next = latestScheduleBoundary(now);
+  next.setHours(next.getHours() + 12);
+  return next;
+}
+
+async function statusCommand() {
+  let connected = false;
+  try {
+    const config = await readConfig();
+    requireWebhookUrl(config.webhookUrl);
+    connected = true;
+  } catch {
+    connected = false;
+  }
+
+  const state = await readServiceState();
+  const installed = await serviceInstalled();
+  console.log(connected ? "CONNECTED" : "NOT CONNECTED");
+  console.log(installed ? "SERVICE INSTALLED" : "SERVICE NOT INSTALLED");
+  console.log(`LAST SUCCESS\t${state.lastSuccessfulAt ?? "NEVER"}`);
+  console.log(`LAST ERROR\t${state.lastErrorCode ?? "NONE"}`);
+  console.log(`NEXT BOUNDARY\t${nextScheduleBoundary().toISOString()}`);
+}
+
+async function doctorCommand() {
+  for (const source of sourceDefinitions()) {
+    let files = 0;
+    let rows = 0;
+    let failed = false;
+
+    for (const root of source.roots) {
+      const sourceFiles = (
+        await collectFiles(root, 1000, { includeLogs: source.includeLogs })
+      ).filter(
+        (file) => !source.includeFile || source.includeFile(file),
+      );
+      files += sourceFiles.length;
+
+      for (const file of sourceFiles) {
+        try {
+          rows += (
+            await readUsageFile(file, source.tool, {
+              id: source.id ?? `${source.tool}-local`,
+              priority: source.priority ?? 100,
+            })
+          ).length;
+        } catch {
+          failed = true;
+        }
+      }
+    }
+
+    const status = failed
+      ? "ERROR"
+      : rows > 0
+        ? "READY"
+        : source.tool === "cursor"
+          ? "EXACT SOURCE REQUIRED"
+          : files > 0
+            ? "DETECTED / NO TOKEN ROWS"
+            : "UNAVAILABLE";
+    console.log(`${source.tool}\t${status}\t${files} files\t${rows} rows`);
+  }
 }
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function runScheduledUpload(args) {
+  return withCollectorLock(async () => {
+    const now = currentTime();
+    const boundary = latestScheduleBoundary(now);
+    const state = await readServiceState();
+
+    if (
+      state.lastScheduledBoundary &&
+      new Date(state.lastScheduledBoundary).getTime() >= boundary.getTime()
+    ) {
+      return { skipped: true, reason: "already-synced" };
+    }
+
+    await writeServiceState({
+      ...state,
+      lastAttemptAt: now.toISOString(),
+      lastErrorCode: null,
+    });
+
+    try {
+      const result = await upload(
+        args.filter((arg) => arg !== "--scheduled"),
+        { quiet: true, trackState: false },
+      );
+      await writeServiceState({
+        ...state,
+        lastAttemptAt: now.toISOString(),
+        lastSuccessfulAt: now.toISOString(),
+        lastScheduledBoundary: boundary.toISOString(),
+        lastErrorCode: null,
+      });
+      return result;
+    } catch (error) {
+      await writeServiceState({
+        ...state,
+        lastAttemptAt: now.toISOString(),
+        lastErrorCode: "UPLOAD_FAILED",
+      });
+      throw error;
+    }
+  });
+}
+
 async function daemon(args) {
   if (args.includes("--once")) {
-    await upload(args);
+    if (args.includes("--scheduled")) {
+      await runScheduledUpload(args);
+    } else {
+      await upload(args);
+    }
     return;
   }
 
@@ -1462,18 +2376,42 @@ async function main() {
 
   switch (command) {
     case "tools":
-      console.log(TOOL_KEYS.join("\n"));
+      await printLogo();
+      printSection("SUPPORTED TOOL GRID");
+      for (const tool of TOOL_KEYS) {
+        console.log(`${color("38;5;48;1", "•")} ${tool}`);
+      }
       return;
     case "sources":
+      await printLogo();
+      printSection("Local source adapters");
       printSources();
+      return;
+    case "status":
+      await printLogo();
+      printSection("GRID STATUS");
+      await statusCommand();
+      return;
+    case "doctor":
+      await printLogo();
+      printSection("SOURCE DIAGNOSTICS");
+      await doctorCommand();
       return;
     case "preview":
       await preview(args);
       return;
     case "connect": {
+      const compact = process.env.TOKENRANK_NO_LOGO === "1";
+      if (!compact) {
+        await printLogo();
+        printSection("Connect");
+      }
       const webhookUrl = requireWebhookUrl(args[0]);
       await writeConfig({ webhookUrl, connectedAt: new Date().toISOString() });
-      console.log("已保存 webhook。");
+      printSuccess("已保存 webhook。");
+      if (!compact) {
+        printMuted("next: tokenrank upload");
+      }
       return;
     }
     case "logout":
@@ -1487,16 +2425,19 @@ async function main() {
       return;
     case "service":
       if (args[0] === "install") {
+        await printLogo();
         await installService(args.slice(1));
         return;
       }
 
       if (args[0] === "status") {
+        await printLogo();
         await serviceStatus();
         return;
       }
 
       if (args[0] === "uninstall") {
+        await printLogo();
         await uninstallService();
         return;
       }
