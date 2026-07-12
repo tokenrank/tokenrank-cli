@@ -85,16 +85,6 @@ function fitLine(value, width) {
   return chars.length > width ? chars.slice(0, width).join("") : value.padEnd(width, " ");
 }
 
-function centerLine(value, width) {
-  const length = [...value].length;
-  if (length >= width) {
-    return [...value].slice(0, width).join("");
-  }
-
-  const left = Math.floor((width - length) / 2);
-  return `${" ".repeat(left)}${value}${" ".repeat(width - length - left)}`;
-}
-
 function trueColor(value, foreground, background) {
   if (!useColor) {
     return value;
@@ -102,10 +92,6 @@ function trueColor(value, foreground, background) {
 
   const backgroundCode = background ? `\x1b[48;2;${background.join(";")}m` : "";
   return `${backgroundCode}\x1b[38;2;${foreground.join(";")}m${value}\x1b[0m`;
-}
-
-function neonBlock(value, foreground, background) {
-  return trueColor(value, foreground, background);
 }
 
 function logo() {
@@ -140,14 +126,8 @@ async function printLogo() {
   }
 
   if (useAnimation) {
-    const frames = ["▰▱▱▱▱▱", "▰▰▰▱▱▱", "▰▰▰▰▰▰"];
-    for (const [index, frame] of frames.entries()) {
-      const pulse = neonBlock(
-        fitLine(`  ${frame}  BOOTING TOKEN GRID ${String(index + 1).padStart(2, "0")}/03`, Math.min(terminalColumns, 64)),
-        [7, 12, 24],
-        index === 2 ? [36, 255, 184] : [105, 48, 255],
-      );
-      process.stdout.write(`\r${pulse}`);
+    for (const point of ["○", "●"]) {
+      process.stdout.write(`\r${trueColor(`  ${point} COLLECTOR STARTING`, cliPalette.lime)}`);
       await sleep(70);
     }
     process.stdout.write("\r\x1b[2K");
@@ -200,40 +180,18 @@ async function renderUploadGrid(completed, total) {
   }
 
   const width = Math.min(terminalColumns, 104);
-  const barWidth = Math.max(10, Math.min(42, width - 34));
+  const barWidth = Math.max(10, Math.min(36, width - 34));
   const filled = Math.round((completed / total) * barWidth);
-  const baseBar = `${"█".repeat(filled)}${"░".repeat(barWidth - filled)}`;
-  const frames = useAnimation && total <= 4 ? 3 : 1;
+  const bar = `${"█".repeat(filled)}${"░".repeat(barWidth - filled)}`;
+  const line = fitLine(`  UPLOAD PROGRESS  [${bar}]  ${completed}/${total}`, width);
+  const rendered = trueColor(line, cliPalette.lime);
 
-  for (let frame = 0; frame < frames; frame += 1) {
-    const spark = frames > 1 ? ["◢", "◆", "◣"][frame] : "◆";
-    const line = fitLine(
-      `  ${spark} UPLOAD GRID  [${baseBar}]  ${completed}/${total}`,
-      width,
-    );
-    const rendered = neonBlock(
-      line,
-      [255, 255, 255],
-      frame === frames - 1 ? [255, 37, 141] : [105, 48, 255],
-    );
-
-    if (frames > 1) {
-      process.stdout.write(`\r${rendered}`);
-      await sleep(45);
-    } else {
-      console.log(rendered);
-    }
-  }
-
-  if (frames > 1) {
-    process.stdout.write("\r\x1b[2K");
-    console.log(
-      neonBlock(
-        fitLine(`  ◆ UPLOAD GRID  [${baseBar}]  ${completed}/${total}`, width),
-        [255, 255, 255],
-        [255, 37, 141],
-      ),
-    );
+  if (useAnimation && completed < total) {
+    process.stdout.write(`\r${rendered}`);
+  } else if (useAnimation) {
+    process.stdout.write(`\r${rendered}\n`);
+  } else {
+    console.log(rendered);
   }
 }
 
@@ -1908,7 +1866,7 @@ async function upload(args, options = {}) {
 
   if (!quiet) {
     if (terminalIsTty) {
-      printSuccess("GRID SYNCHRONIZED", `${payload.entries.length} rows locked`);
+      printSuccess("UPLOAD COMPLETE", `${payload.entries.length} rows`);
     } else {
       printSuccess(`上传成功: ${payload.entries.length} 条`);
     }
