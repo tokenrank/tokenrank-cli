@@ -64,6 +64,17 @@ const terminalIsTty = process.env.TOKENRANK_TEST_TTY === "1" || Boolean(process.
 const terminalColumns = Math.max(40, Number(process.env.COLUMNS || process.stdout.columns || 80));
 const useColor = process.env.NO_COLOR !== "1" && terminalIsTty;
 const useAnimation = useColor && process.env.TOKENRANK_NO_ANIMATION !== "1";
+const cliPalette = {
+  background: [7, 9, 7],
+  ivory: [242, 241, 232],
+  muted: [133, 139, 128],
+  lime: [214, 255, 63],
+  orange: [255, 91, 53],
+  surface: [13, 16, 14],
+  surface2: [20, 24, 20],
+  line: [52, 58, 51],
+};
+let sectionIndex = 0;
 
 function color(code, value) {
   return useColor ? `\x1b[${code}m${value}\x1b[0m` : value;
@@ -84,52 +95,47 @@ function centerLine(value, width) {
   return `${" ".repeat(left)}${value}${" ".repeat(width - length - left)}`;
 }
 
-function neonBlock(value, foreground, background) {
+function trueColor(value, foreground, background) {
   if (!useColor) {
     return value;
   }
 
-  return `\x1b[48;2;${background.join(";")}m\x1b[38;2;${foreground.join(";")}m${value}\x1b[0m`;
+  const backgroundCode = background ? `\x1b[48;2;${background.join(";")}m` : "";
+  return `${backgroundCode}\x1b[38;2;${foreground.join(";")}m${value}\x1b[0m`;
+}
+
+function neonBlock(value, foreground, background) {
+  return trueColor(value, foreground, background);
 }
 
 function logo() {
   const width = Math.min(terminalColumns, 104);
   const compact = width < 72;
-  const art = compact
-    ? [
-        "████  TOKENRANK  ████",
-        "◢██◣  NEON TOKEN GRID  ◢██◣",
-      ]
-    : [
-        "████████╗ ██████╗ ██╗  ██╗███████╗███╗   ██╗██████╗  █████╗ ███╗   ██╗██╗  ██╗",
-        "╚══██╔══╝██╔═══██╗██║ ██╔╝██╔════╝████╗  ██║██╔══██╗██╔══██╗████╗  ██║██║ ██╔╝",
-        "   ██║   ██║   ██║█████╔╝ █████╗  ██╔██╗ ██║██████╔╝███████║██╔██╗ ██║█████╔╝ ",
-        "   ██║   ╚██████╔╝██║  ██╗███████╗██║ ╚████║██║  ██║██║  ██║██║ ╚████║██║  ██╗",
-      ];
-  const palettes = [
-    { foreground: [7, 12, 24], background: [36, 255, 184] },
-    { foreground: [6, 10, 26], background: [0, 218, 255] },
-    { foreground: [255, 255, 255], background: [105, 48, 255] },
-    { foreground: [255, 255, 255], background: [255, 37, 141] },
-  ];
+
+  if (compact) {
+    return [
+      trueColor(fitLine("  TOKEN/RANK // COLLECTOR", width), cliPalette.background, cliPalette.lime),
+      trueColor(fitLine("  ● COLLECTOR ONLINE", width), cliPalette.lime, cliPalette.surface),
+    ].join("\n");
+  }
+
+  const statusPrefix = "  STATUS / 001   ";
+  const rank = "01";
+  const online = "   ● COLLECTOR ONLINE";
+  const statusPadding = " ".repeat(Math.max(0, width - [...`${statusPrefix}${rank}${online}`].length));
   const lines = [
-    neonBlock(fitLine("  TOKENRANK // LIVE GRID", width), [7, 12, 24], [255, 190, 36]),
-    ...art.map((line, index) => {
-      const palette = palettes[index % palettes.length];
-      return neonBlock(centerLine(line, width), palette.foreground, palette.background);
-    }),
-    neonBlock(
-      fitLine("  PRIVATE AGGREGATES  ◈  FAIR TOKEN TELEMETRY  ◈  ONLINE", width),
-      [222, 255, 247],
-      [15, 24, 45],
-    ),
+    trueColor(fitLine("  TOKEN/RANK // COLLECTOR", width), cliPalette.background, cliPalette.lime),
+    trueColor(fitLine("  AI TOKEN LEAGUE // PRIVATE AGGREGATES", width), cliPalette.muted),
+    trueColor(fitLine("  BURN TOKENS.", width), cliPalette.ivory),
+    trueColor(fitLine("  ASCEND RANKS.", width), cliPalette.lime),
+    `${trueColor(statusPrefix, cliPalette.muted)}${trueColor(rank, cliPalette.orange)}${trueColor(`${online}${statusPadding}`, cliPalette.lime)}`,
   ];
 
   return lines.join("\n");
 }
 
 async function printLogo() {
-  if (process.env.TOKENRANK_NO_LOGO === "1") {
+  if (process.env.TOKENRANK_NO_LOGO === "1" || !useColor) {
     return;
   }
 
@@ -152,41 +158,35 @@ async function printLogo() {
 
 function printSection(title) {
   console.log("");
-  if (terminalIsTty) {
-    const width = Math.min(terminalColumns, 104);
-    console.log(neonBlock(fitLine(`  ${title.toUpperCase()}  ━━━━━━━━━━━━━━━━━━━━━`, width), [255, 255, 255], [58, 24, 120]));
+  sectionIndex += 1;
+  const prefix = String(sectionIndex).padStart(2, "0");
+
+  if (useColor) {
+    console.log(`${trueColor(`${prefix} /`, cliPalette.lime)} ${trueColor(title.toUpperCase(), cliPalette.ivory)}`);
   } else {
-    console.log(color("1", `== ${title} ==`));
+    console.log(`== ${title.toUpperCase()} ==`);
   }
 }
 
 function printStep(label, detail = "") {
-  if (terminalIsTty) {
+  if (useColor) {
     const width = Math.min(terminalColumns, 104);
-    console.log(
-      neonBlock(
-        fitLine(`  ▰ ${label}${detail ? `  ${detail}` : ""}`, width),
-        [220, 255, 248],
-        [12, 55, 76],
-      ),
-    );
+    const prefix = "  ■ ";
+    const body = fitLine(`${label}${detail ? `  ${detail}` : ""}`, Math.max(1, width - [...prefix].length));
+    console.log(`${trueColor(prefix, cliPalette.lime, cliPalette.surface2)}${trueColor(body, cliPalette.ivory, cliPalette.surface2)}`);
   } else {
-    console.log(`${color("38;5;48;1", "->")} ${label}${detail ? color("38;5;244", ` ${detail}`) : ""}`);
+    console.log(`-> ${label}${detail ? ` ${detail}` : ""}`);
   }
 }
 
 function printSuccess(label, detail = "") {
-  if (terminalIsTty) {
+  if (useColor) {
     const width = Math.min(terminalColumns, 104);
-    console.log(
-      neonBlock(
-        fitLine(`  ✓ ${label}${detail ? `  ·  ${detail}` : ""}`, width),
-        [7, 12, 24],
-        [36, 255, 184],
-      ),
-    );
+    const prefix = "  OK ";
+    const body = fitLine(`${label}${detail ? `  ·  ${detail}` : ""}`, Math.max(1, width - [...prefix].length));
+    console.log(`${trueColor(prefix, cliPalette.background, cliPalette.lime)}${trueColor(body, cliPalette.ivory, cliPalette.surface)}`);
   } else {
-    console.log(`${color("38;5;48;1", "OK")} ${label}${detail ? color("38;5;244", ` ${detail}`) : ""}`);
+    console.log(`OK ${label}${detail ? ` ${detail}` : ""}`);
   }
 }
 
@@ -2377,7 +2377,7 @@ async function main() {
   switch (command) {
     case "tools":
       await printLogo();
-      printSection("SUPPORTED TOOL GRID");
+      printSection("SUPPORTED TOOLS");
       for (const tool of TOOL_KEYS) {
         console.log(`${color("38;5;48;1", "•")} ${tool}`);
       }
