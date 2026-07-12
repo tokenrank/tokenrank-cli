@@ -74,11 +74,20 @@ const cliPalette = {
   surface2: [20, 24, 20],
   line: [52, 58, 51],
 };
+const scoreboardMaxWidth = 50;
 let sectionIndex = 0;
 
 function fitLine(value, width) {
   const chars = [...value];
   return chars.length > width ? chars.slice(0, width).join("") : value.padEnd(width, " ");
+}
+
+function trimLine(value, width) {
+  return [...value].slice(0, Math.max(0, width)).join("");
+}
+
+function scoreboardWidth() {
+  return Math.min(terminalColumns, scoreboardMaxWidth);
 }
 
 function trueColor(value, foreground, background) {
@@ -90,27 +99,130 @@ function trueColor(value, foreground, background) {
   return `${backgroundCode}\x1b[38;2;${foreground.join(";")}m${value}\x1b[0m`;
 }
 
-function logo() {
-  const width = Math.min(terminalColumns, 104);
-  const compact = width < 72;
+function panelLine(left, right = "", options = {}) {
+  const innerWidth = Math.max(1, scoreboardWidth() - 4);
+  const safeRight = trimLine(right, Math.max(0, innerWidth - 1));
+  const leftWidth = Math.max(0, innerWidth - [...safeRight].length - (safeRight ? 1 : 0));
+  const leftValue = options.leftSegments?.map((segment) => segment.value).join("") ?? left;
+  const safeLeft = trimLine(leftValue, leftWidth);
+  const gap = " ".repeat(Math.max(0, innerWidth - [...safeLeft, ...safeRight].length));
+  const borderColor = options.accent ? cliPalette.orange : cliPalette.line;
+  let renderedLeft = trueColor(safeLeft, options.leftColor ?? cliPalette.ivory);
 
-  if (compact) {
-    return [
-      trueColor(fitLine("  TOKEN/RANK // COLLECTOR", width), cliPalette.background, cliPalette.lime),
-      trueColor(fitLine("  ● COLLECTOR ONLINE", width), cliPalette.lime, cliPalette.surface),
-    ].join("\n");
+  if (options.leftSegments) {
+    let remaining = leftWidth;
+    renderedLeft = options.leftSegments
+      .map((segment) => {
+        const value = trimLine(segment.value, remaining);
+        remaining -= [...value].length;
+        return trueColor(value, segment.color);
+      })
+      .join("");
   }
 
-  const statusPrefix = "  STATUS / 001   ";
-  const rank = "01";
-  const online = "   ● COLLECTOR ONLINE";
-  const statusPadding = " ".repeat(Math.max(0, width - [...`${statusPrefix}${rank}${online}`].length));
+  return `${trueColor("│ ", borderColor)}${renderedLeft}${gap}${trueColor(safeRight, options.rightColor ?? cliPalette.lime)}${trueColor(" │", cliPalette.line)}`;
+}
+
+function printPanel(rows, options = {}) {
+  const width = scoreboardWidth();
+  const border = `┌${"─".repeat(Math.max(0, width - 2))}┐`;
+  const footer = `└${"─".repeat(Math.max(0, width - 2))}┘`;
+
+  console.log("");
+  console.log(trueColor(border, cliPalette.line));
+  for (const row of rows) {
+    console.log(panelLine(row.left, row.right, { ...row, accent: options.accent }));
+  }
+  console.log(trueColor(footer, cliPalette.line));
+}
+
+function renderConnectionPanel(host) {
+  printPanel([
+    { left: "UPLOAD ENDPOINT", right: "CONNECTED", leftColor: cliPalette.muted },
+    { left: host, leftColor: cliPalette.ivory },
+  ]);
+}
+
+function renderSourceProgress(label, completed, total) {
+  if (!useAnimation) {
+    return;
+  }
+
+  const counter = `${String(completed).padStart(2, "0")} / ${String(total).padStart(2, "0")}`;
+  const line = fitLine(`LOCAL SOURCES  ${counter}  ${label.toUpperCase()}`, scoreboardWidth());
+  process.stdout.write(`\r${trueColor(line, cliPalette.muted)}`);
+}
+
+function clearSourceProgress() {
+  if (useAnimation) {
+    process.stdout.write("\r\x1b[2K");
+  }
+}
+
+function renderSourcesPanel(sourceStats) {
+  const active = sourceStats.filter((source) => source.entryCount > 0);
+  const skipped = sourceStats.length - active.length;
+  const rows = [
+    {
+      left: "LOCAL SOURCES",
+      right: `${String(sourceStats.length).padStart(2, "0")} / ${String(sourceStats.length).padStart(2, "0")}`,
+      leftColor: cliPalette.muted,
+      rightColor: cliPalette.muted,
+    },
+  ];
+
+  for (const source of sourceStats.slice(0, 2)) {
+    const hasUsage = source.entryCount > 0;
+    const filledBar = hasUsage ? "██████████" : "";
+    const emptyBar = hasUsage ? "░░░░" : "░░░░░░░░░░░░░░";
+    rows.push({
+      left: `${source.label} ${filledBar}${emptyBar}`,
+      leftSegments: [
+        { value: `${source.label} `, color: hasUsage ? cliPalette.ivory : cliPalette.muted },
+        { value: filledBar, color: cliPalette.lime },
+        { value: emptyBar, color: cliPalette.muted },
+      ],
+      right: hasUsage ? "DONE" : "SKIPPED",
+      leftColor: hasUsage ? cliPalette.ivory : cliPalette.muted,
+      rightColor: hasUsage ? cliPalette.lime : cliPalette.muted,
+    });
+  }
+
+  rows.push({
+    left: `${active.length} ACTIVE`,
+    right: `${skipped} SKIPPED`,
+    leftColor: cliPalette.lime,
+    rightColor: cliPalette.muted,
+  });
+  printPanel(rows);
+}
+
+function renderPrivacyPanel() {
+  printPanel(
+    [{ left: "PRIVATE CONTENT NEVER LEAVES THIS MACHINE", leftColor: cliPalette.orange }],
+    { accent: true },
+  );
+}
+
+function logo() {
+  const width = scoreboardWidth();
+  const compact = terminalColumns < 72;
+  const liveLabel = "TOKEN/RANK // LIVE";
+  const liveRank = "01";
+  const liveBand = `${liveLabel}${" ".repeat(Math.max(1, width - [...liveLabel, ...liveRank].length))}${liveRank}`;
+
+  if (compact) {
+    return trueColor(fitLine(liveBand, width), cliPalette.background, cliPalette.lime);
+  }
+
+  const burn = "  BURN TOKENS.";
+  const rankGap = " ".repeat(Math.max(1, width - [...burn, ...liveRank].length));
   const lines = [
-    trueColor(fitLine("  TOKEN/RANK // COLLECTOR", width), cliPalette.background, cliPalette.lime),
-    trueColor(fitLine("  AI TOKEN LEAGUE // PRIVATE AGGREGATES", width), cliPalette.muted),
-    trueColor(fitLine("  BURN TOKENS.", width), cliPalette.ivory),
+    trueColor(fitLine(liveBand, width), cliPalette.background, cliPalette.lime),
+    trueColor(fitLine("  PUBLIC RANK SIGNAL", width), cliPalette.muted),
+    "",
+    `${trueColor(burn, cliPalette.ivory)}${rankGap}${trueColor(liveRank, cliPalette.orange)}`,
     trueColor(fitLine("  ASCEND RANKS.", width), cliPalette.lime),
-    `${trueColor(statusPrefix, cliPalette.muted)}${trueColor(rank, cliPalette.orange)}${trueColor(`${online}${statusPadding}`, cliPalette.lime)}`,
   ];
 
   return lines.join("\n");
@@ -157,10 +269,7 @@ function printStep(label, detail = "") {
 
 function printSuccess(label, detail = "") {
   if (useColor) {
-    const width = Math.min(terminalColumns, 104);
-    const prefix = "  OK ";
-    const body = fitLine(`${label}${detail ? `  ·  ${detail}` : ""}`, Math.max(1, width - [...prefix].length));
-    console.log(`${trueColor(prefix, cliPalette.background, cliPalette.lime)}${trueColor(body, cliPalette.ivory, cliPalette.surface)}`);
+    console.log(`${trueColor("OK", cliPalette.lime)} ${trueColor(`${label}${detail ? `  ·  ${detail}` : ""}`, cliPalette.ivory)}`);
   } else {
     console.log(`OK ${label}${detail ? ` ${detail}` : ""}`);
   }
@@ -170,25 +279,31 @@ function printMuted(label) {
   console.log(trueColor(label, cliPalette.muted));
 }
 
-async function renderUploadGrid(completed, total) {
-  if (!terminalIsTty) {
+async function renderUploadGrid(completed, total, entryCount) {
+  if (!useColor) {
     return;
   }
 
-  const width = Math.min(terminalColumns, 104);
-  const barWidth = Math.max(10, Math.min(36, width - 34));
+  const width = scoreboardWidth();
+  const barWidth = Math.max(10, Math.min(18, width - 28));
   const filled = Math.round((completed / total) * barWidth);
   const bar = `${"█".repeat(filled)}${"░".repeat(barWidth - filled)}`;
-  const line = fitLine(`  UPLOAD PROGRESS  [${bar}]  ${completed}/${total}`, width);
-  const rendered = trueColor(line, cliPalette.lime);
 
   if (useAnimation && completed < total) {
-    process.stdout.write(`\r${rendered}`);
-  } else if (useAnimation) {
-    process.stdout.write(`\r${rendered}\n`);
-  } else {
-    console.log(rendered);
+    const line = fitLine(`RANK SIGNAL  ${bar}  ${completed}/${total}`, width);
+    process.stdout.write(`\r${trueColor(line, cliPalette.lime)}`);
+    return;
   }
+
+  if (useAnimation) {
+    process.stdout.write("\r\x1b[2K");
+  }
+
+  const percent = Math.round((completed / total) * 100);
+  printPanel([
+    { left: "RANK SIGNAL", right: "UPLOAD COMPLETE", leftColor: cliPalette.muted },
+    { left: bar, right: `${percent}% / ${entryCount} ROWS`, leftColor: cliPalette.lime },
+  ]);
 }
 
 async function readCliPackageJson(candidates) {
@@ -1417,22 +1532,24 @@ async function scanLocalUsage(args, options = {}) {
   const { tool, since } = getScanOptions(args);
   const entries = [];
   const progress = Boolean(options.progress);
+  const sources = sourceDefinitions().filter((source) => !tool || source.tool === tool);
+  const sourceStats = [];
 
-  if (progress) {
+  if (progress && !useColor) {
     printSection("Scan local usage");
     printMuted(`scope: ${tool || "all tools"}${since ? ` since ${since}` : ""}`);
   }
 
-  for (const source of sourceDefinitions()) {
-    if (tool && source.tool !== tool) {
-      continue;
-    }
-
+  for (const [sourceIndex, source] of sources.entries()) {
     let sourceFileCount = 0;
     let sourceEntryCount = 0;
 
     if (progress) {
-      printStep(`Scanning ${source.label}`, source.tool);
+      if (useColor) {
+        renderSourceProgress(source.label, sourceIndex + 1, sources.length);
+      } else {
+        printStep(`Scanning ${source.label}`, source.tool);
+      }
     }
 
     for (const root of source.roots) {
@@ -1451,7 +1568,14 @@ async function scanLocalUsage(args, options = {}) {
       }
     }
 
-    if (progress) {
+    sourceStats.push({
+      label: source.label,
+      tool: source.tool,
+      fileCount: sourceFileCount,
+      entryCount: sourceEntryCount,
+    });
+
+    if (progress && !useColor) {
       printMuted(`   ${source.tool}: ${sourceFileCount} files, ${sourceEntryCount} raw rows`);
     }
   }
@@ -1461,10 +1585,16 @@ async function scanLocalUsage(args, options = {}) {
   const aggregatedEntries = aggregateEntries(uniqueEntries);
 
   if (progress) {
-    printSuccess(
-      "Scan complete",
-      `${filteredEntries.length} raw rows -> ${uniqueEntries.length} unique -> ${aggregatedEntries.length} aggregate rows`,
-    );
+    if (useColor) {
+      clearSourceProgress();
+      renderSourcesPanel(sourceStats);
+      renderPrivacyPanel();
+    } else {
+      printSuccess(
+        "Scan complete",
+        `${filteredEntries.length} raw rows -> ${uniqueEntries.length} unique -> ${aggregatedEntries.length} aggregate rows`,
+      );
+    }
   }
 
   return aggregatedEntries;
@@ -1807,13 +1937,17 @@ async function upload(args, options = {}) {
   const quiet = Boolean(options.quiet);
   if (!quiet) {
     await printLogo();
-    printSection("Upload");
   }
   const config = await readConfig();
   const webhookUrl = requireWebhookUrl(config.webhookUrl);
   const file = getFileArg(args);
   if (!quiet) {
-    printStep("Webhook ready", new URL(webhookUrl).origin);
+    if (useColor) {
+      renderConnectionPanel(new URL(webhookUrl).host);
+    } else {
+      printSection("Upload");
+      printStep("Webhook ready", new URL(webhookUrl).origin);
+    }
   }
   const raw = file
     ? JSON.parse(await readFile(file, "utf8"))
@@ -1821,7 +1955,7 @@ async function upload(args, options = {}) {
   if (file && !quiet) {
     printStep("Loaded usage file", file);
   }
-  if (!quiet) {
+  if (!quiet && !useColor) {
     printStep("Build payload");
   }
   const payload = buildUploadPayload(raw);
@@ -1832,12 +1966,12 @@ async function upload(args, options = {}) {
       }))
     : [payload];
 
-  if (!quiet) {
+  if (!quiet && !useColor) {
     printStep("Uploading", `${payload.entries.length} rows in ${batches.length} batch(es)`);
   }
 
   for (const [index, batch] of batches.entries()) {
-    if (!quiet) {
+    if (!quiet && !useColor) {
       printMuted(`   batch ${index + 1}/${batches.length}: ${batch.entries.length} rows`);
     }
     const response = await postJson(webhookUrl, batch);
@@ -1856,11 +1990,11 @@ async function upload(args, options = {}) {
     }
 
     if (!quiet) {
-      await renderUploadGrid(index + 1, batches.length);
+      await renderUploadGrid(index + 1, batches.length, payload.entries.length);
     }
   }
 
-  if (!quiet) {
+  if (!quiet && !useColor) {
     if (terminalIsTty) {
       printSuccess("UPLOAD COMPLETE", `${payload.entries.length} rows`);
     } else {
