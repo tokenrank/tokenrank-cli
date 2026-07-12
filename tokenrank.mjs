@@ -2018,7 +2018,7 @@ function windowsTaskXml(runnerPath) {
     "SYSTEM";
   const runnerArgs = `-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "${runnerPath}"`;
 
-  return `<?xml version="1.0" encoding="UTF-8"?>
+  return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo><Description>TokenRank collector at 00:00, 12:00, and after missed runs.</Description></RegistrationInfo>
   <Triggers>
@@ -2093,7 +2093,7 @@ async function installService(args = []) {
     await writeFile(timerFile, systemdTimer());
   }
   if (taskFile) {
-    await writeFile(taskFile, windowsTaskXml(file));
+    await writeFile(taskFile, `\uFEFF${windowsTaskXml(file)}`, "utf16le");
   }
 
   if (!process.env.TOKENRANK_SERVICE_NO_REGISTER) {
