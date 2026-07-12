@@ -35,6 +35,291 @@ const TOOL_KEYS = [
   "continue",
 ];
 const CACHE_INCLUDED_INPUT_TOOLS = new Set(["codex"]);
+const cliMessages = {
+  en: {
+    active: "ACTIVE",
+    ascendRanks: "ASCEND RANKS.",
+    aggregateRows: "aggregate rows",
+    allTools: "all tools",
+    batch: "batch {current}/{total}: {count} {rows}",
+    buildPayload: "Build payload",
+    burnTokens: "BURN TOKENS.",
+    collectorStarting: "COLLECTOR STARTING",
+    commands: "Commands:",
+    connect: "Connect",
+    connected: "CONNECTED",
+    collectionSchedule: "Collection schedule: {schedule}",
+    dailySchedule: "daily at 12:00 and 24:00",
+    detectedNoRows: "DETECTED / NO TOKEN ROWS",
+    done: "DONE",
+    error: "ERROR",
+    exactSourceRequired: "EXACT SOURCE REQUIRED",
+    files: "files",
+    gridStatus: "GRID STATUS",
+    ignoredInterval: "Ignored --interval: background collection is fixed to {schedule}.",
+    installed: "Installed: {file}",
+    installedBackgroundService: "Installed background service: {file}",
+    invalidDate: "entry.date must be a real date in YYYY-MM-DD format.",
+    invalidInterval: "--interval must be an integer of at least 60 seconds.",
+    invalidNow: "TOKENRANK_NOW must be a valid date and time.",
+    invalidSince: "--since must be YYYY-MM-DD.",
+    invalidUsageEntry: "Each usage entry must be an object.",
+    invalidUsageInput: "usage JSON must be an array or an object containing an entries array.",
+    invalidWebhookProtocol: "The webhook URL must use http or https.",
+    invalidWebhookUrl: "The webhook URL is invalid.",
+    language: "Language: auto (override with --lang en|zh or TOKENRANK_LANG=en|zh)",
+    lastError: "LAST ERROR",
+    lastSuccess: "LAST SUCCESS",
+    loadedUsageFile: "Loaded usage file",
+    localSourceAdapters: "LOCAL SOURCE ADAPTERS",
+    localSources: "LOCAL SOURCES",
+    missingFile: "Missing the usage.json path after --file.",
+    missingOptionValue: "Missing a value for {name}.",
+    missingWebhook: "Missing webhook URL. Generate one in the TokenRank dashboard first.",
+    never: "NEVER",
+    nextBoundary: "NEXT BOUNDARY",
+    nextUpload: "next: tokenrank upload",
+    noLocalUsage: "No local token usage was found for upload.",
+    none: "NONE",
+    notConnected: "NOT CONNECTED",
+    notInstalled: "Not installed",
+    nonNegativeInteger: "{key} must be a non-negative integer.",
+    privacy: "PRIVATE CONTENT NEVER LEAVES THIS MACHINE",
+    proxyConnectionFailed: "Proxy connection failed: HTTP {status}",
+    proxyResponseInvalid: "The proxy response is invalid.",
+    publicRankSignal: "PUBLIC RANK SIGNAL",
+    rankSignal: "RANK SIGNAL",
+    ready: "READY",
+    removedWebhook: "Removed local webhook configuration.",
+    row: "row",
+    rows: "rows",
+    savedWebhook: "Saved webhook.",
+    scanComplete: "Scan complete",
+    scanLocalUsage: "Scan local usage",
+    scanning: "Scanning {source}",
+    scope: "scope: {scope}",
+    serviceInstalled: "SERVICE INSTALLED",
+    serviceNotInstalled: "SERVICE NOT INSTALLED",
+    skipped: "SKIPPED",
+    sourceDiagnostics: "SOURCE DIAGNOSTICS",
+    supportedTools: "SUPPORTED TOOLS",
+    totalMismatch: "total must match the token accounting rule for this tool.",
+    unattributedEmpty: "(empty)",
+    unavailable: "UNAVAILABLE",
+    uniqueRows: "unique",
+    unknownCommand: "Unknown command: {command}",
+    unknownServiceCommand: "Unknown service command.",
+    unsupportedLanguage: "Unsupported language: {language}. Use en, zh, or auto.",
+    unsupportedTool: "Unsupported tool: {tool}",
+    unsupportedWebhookProtocol: "Unsupported webhook protocol: {protocol}",
+    uninstallService: "Uninstalled background service: {file}",
+    upload: "Upload",
+    uploadComplete: "UPLOAD COMPLETE",
+    uploadEndpoint: "UPLOAD ENDPOINT",
+    uploadFailed: "Upload failed: {error}",
+    uploadSuccess: "Upload complete: {count} {rows}",
+    uploading: "Uploading {count} {rows} in {batches} batch(es)",
+    usageDescription: "usage.json may be either { entries: [...] } or an array of aggregate entries.",
+    usageTitle: "TokenRank collector",
+    webhookConfigMissing: "Run tokenrank connect <webhook-url> first.",
+    webhookReady: "Webhook ready",
+  },
+  zh: {
+    active: "活跃",
+    ascendRanks: "RANKING 狂飙。",
+    aggregateRows: "聚合记录",
+    allTools: "全部工具",
+    batch: "批次 {current}/{total}：{count} {rows}",
+    buildPayload: "构建上传数据",
+    burnTokens: "TOKEN 燃烧。",
+    collectorStarting: "采集器启动中",
+    commands: "命令：",
+    connect: "连接",
+    connected: "已连接",
+    collectionSchedule: "采集时间：{schedule}",
+    dailySchedule: "每天 12:00 和 24:00",
+    detectedNoRows: "已检测 / 暂无 Token 记录",
+    done: "完成",
+    error: "错误",
+    exactSourceRequired: "需要精确数据源",
+    files: "个文件",
+    gridStatus: "运行状态",
+    ignoredInterval: "已忽略 --interval：后台采集时间固定为{schedule}。",
+    installed: "已安装：{file}",
+    installedBackgroundService: "已安装后台服务：{file}",
+    invalidDate: "entry.date 必须是 YYYY-MM-DD 格式的真实日期。",
+    invalidInterval: "--interval 必须是不小于 60 的整数秒。",
+    invalidNow: "TOKENRANK_NOW 必须是有效时间。",
+    invalidSince: "--since 必须是 YYYY-MM-DD。",
+    invalidUsageEntry: "每条 usage entry 必须是对象。",
+    invalidUsageInput: "usage JSON 必须是数组，或包含 entries 数组。",
+    invalidWebhookProtocol: "webhook URL 必须是 http 或 https。",
+    invalidWebhookUrl: "webhook URL 格式不正确。",
+    language: "语言：自动（可用 --lang en|zh 或 TOKENRANK_LANG=en|zh 覆盖）",
+    lastError: "最近错误",
+    lastSuccess: "最近成功",
+    loadedUsageFile: "已载入用量文件",
+    localSourceAdapters: "本地数据源适配器",
+    localSources: "本地来源",
+    missingFile: "缺少 --file 后面的 usage.json 路径。",
+    missingOptionValue: "缺少 {name} 参数值。",
+    missingWebhook: "缺少 webhook URL。请先在 TokenRank 仪表盘生成 webhook。",
+    never: "从未",
+    nextBoundary: "下次采集时间",
+    nextUpload: "下一步：tokenrank upload",
+    noLocalUsage: "没有发现可上传的本地 Token 统计。",
+    none: "无",
+    notConnected: "未连接",
+    notInstalled: "未安装",
+    nonNegativeInteger: "{key} 必须是非负整数。",
+    privacy: "私密内容绝不离开本机",
+    proxyConnectionFailed: "代理连接失败：HTTP {status}",
+    proxyResponseInvalid: "代理响应格式不正确。",
+    publicRankSignal: "公开排名信号",
+    rankSignal: "排名信号",
+    ready: "就绪",
+    removedWebhook: "已移除本机 webhook 配置。",
+    row: "条记录",
+    rows: "条记录",
+    savedWebhook: "已保存 webhook。",
+    scanComplete: "扫描完成",
+    scanLocalUsage: "扫描本地用量",
+    scanning: "正在扫描 {source}",
+    scope: "范围：{scope}",
+    serviceInstalled: "后台服务已安装",
+    serviceNotInstalled: "后台服务未安装",
+    skipped: "跳过",
+    sourceDiagnostics: "数据源诊断",
+    supportedTools: "支持的工具",
+    totalMismatch: "total 必须匹配该工具的 Token 统计口径。",
+    unattributedEmpty: "（空）",
+    unavailable: "不可用",
+    uniqueRows: "去重记录",
+    unknownCommand: "未知命令：{command}",
+    unknownServiceCommand: "未知 service 命令。",
+    unsupportedLanguage: "不支持的语言：{language}。请使用 en、zh 或 auto。",
+    unsupportedTool: "不支持的工具：{tool}",
+    unsupportedWebhookProtocol: "不支持的 webhook 协议：{protocol}",
+    uninstallService: "已卸载后台服务：{file}",
+    upload: "上传",
+    uploadComplete: "上传完成",
+    uploadEndpoint: "上传端点",
+    uploadFailed: "上传失败：{error}",
+    uploadSuccess: "上传成功：{count} {rows}",
+    uploading: "正在上传 {count} {rows}，共 {batches} 个批次",
+    usageDescription: "usage.json 可以是 { entries: [...] }，也可以是聚合记录数组。",
+    usageTitle: "TokenRank 采集器",
+    webhookConfigMissing: "请先运行 tokenrank connect <webhook-url>。",
+    webhookReady: "webhook 已就绪",
+  },
+};
+
+function assertCliMessageParity() {
+  const englishKeys = Object.keys(cliMessages.en).sort();
+  const chineseKeys = Object.keys(cliMessages.zh).sort();
+
+  if (englishKeys.join("\n") !== chineseKeys.join("\n")) {
+    throw new Error("TokenRank CLI translation keys are incomplete.");
+  }
+
+  for (const key of englishKeys) {
+    const englishValues = [...cliMessages.en[key].matchAll(/\{([a-zA-Z]+)\}/g)]
+      .map((match) => match[1])
+      .sort();
+    const chineseValues = [...cliMessages.zh[key].matchAll(/\{([a-zA-Z]+)\}/g)]
+      .map((match) => match[1])
+      .sort();
+
+    if (englishValues.join("\n") !== chineseValues.join("\n")) {
+      throw new Error(`TokenRank CLI translation placeholders do not match: ${key}`);
+    }
+  }
+}
+
+assertCliMessageParity();
+
+function localeFromTag(value) {
+  const normalized = String(value ?? "").trim().replaceAll("_", "-").toLowerCase();
+  if (!normalized || normalized === "auto") return null;
+  if (normalized === "zh" || normalized.startsWith("zh-")) return "zh";
+  if (normalized === "en" || normalized.startsWith("en-")) return "en";
+  return null;
+}
+
+function detectSystemLocale() {
+  const localeTag =
+    process.env.LC_ALL ||
+    process.env.LC_MESSAGES ||
+    process.env.LANG ||
+    Intl.DateTimeFormat().resolvedOptions().locale;
+  return localeFromTag(localeTag) ?? "en";
+}
+
+function detectCliLocale() {
+  const configured = String(process.env.TOKENRANK_LANG ?? "").trim();
+  return configured && configured.toLowerCase() !== "auto"
+    ? localeFromTag(configured) ?? detectSystemLocale()
+    : detectSystemLocale();
+}
+
+let cliLocale = detectCliLocale();
+
+function message(key, values = {}) {
+  const template = cliMessages[cliLocale][key];
+  if (typeof template !== "string") {
+    throw new Error(`Missing ${cliLocale} CLI translation: ${key}`);
+  }
+
+  return template.replace(/\{([a-zA-Z]+)\}/g, (_, name) => String(values[name] ?? `{${name}}`));
+}
+
+function rowLabel(count) {
+  return message(count === 1 ? "row" : "rows");
+}
+
+function parseGlobalOptions(argv) {
+  const args = [];
+  let requestedLanguage = null;
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+
+    if (arg === "--lang") {
+      const value = argv[index + 1];
+      if (!value || value.startsWith("-")) {
+        throw new Error(message("missingOptionValue", { name: "--lang" }));
+      }
+      requestedLanguage = value;
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--lang=")) {
+      const value = arg.slice("--lang=".length);
+      if (!value) {
+        throw new Error(message("missingOptionValue", { name: "--lang" }));
+      }
+      requestedLanguage = value;
+      continue;
+    }
+
+    args.push(arg);
+  }
+
+  if (requestedLanguage) {
+    if (requestedLanguage.toLowerCase() === "auto") {
+      cliLocale = detectSystemLocale();
+    } else {
+      const locale = localeFromTag(requestedLanguage);
+      if (!locale) {
+        throw new Error(message("unsupportedLanguage", { language: requestedLanguage }));
+      }
+      cliLocale = locale;
+    }
+  }
+
+  return args;
+}
 
 function unattributedModelForTool(tool) {
   return `${tool}-unattributed`;
@@ -59,7 +344,6 @@ const packageJson = await readCliPackageJson([
 const clientVersion = String(packageJson.version ?? "0.0.0");
 const defaultCollectorIntervalSeconds = 12 * 60 * 60;
 const collectorScheduleHours = [0, 12];
-const collectorScheduleLabel = "每天 12:00 和 24:00";
 const terminalIsTty = process.env.TOKENRANK_TEST_TTY === "1" || Boolean(process.stdout.isTTY);
 const terminalColumns = Math.max(40, Number(process.env.COLUMNS || process.stdout.columns || 80));
 const useColor = process.env.NO_COLOR !== "1" && terminalIsTty;
@@ -78,12 +362,47 @@ const scoreboardMaxWidth = 50;
 let sectionIndex = 0;
 
 function fitLine(value, width) {
-  const chars = [...value];
-  return chars.length > width ? chars.slice(0, width).join("") : value.padEnd(width, " ");
+  const trimmed = trimLine(value, width);
+  return `${trimmed}${" ".repeat(Math.max(0, width - displayWidth(trimmed)))}`;
 }
 
 function trimLine(value, width) {
-  return [...value].slice(0, Math.max(0, width)).join("");
+  let result = "";
+  let currentWidth = 0;
+
+  for (const character of value) {
+    const characterWidth = isFullWidthCodePoint(character.codePointAt(0) ?? 0) ? 2 : 1;
+    if (currentWidth + characterWidth > Math.max(0, width)) {
+      break;
+    }
+    result += character;
+    currentWidth += characterWidth;
+  }
+
+  return result;
+}
+
+function displayWidth(value) {
+  return [...value].reduce(
+    (width, character) => width + (isFullWidthCodePoint(character.codePointAt(0) ?? 0) ? 2 : 1),
+    0,
+  );
+}
+
+function isFullWidthCodePoint(codePoint) {
+  return (
+    codePoint >= 0x1100 &&
+    (codePoint <= 0x115f ||
+      codePoint === 0x2329 ||
+      codePoint === 0x232a ||
+      (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f) ||
+      (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+      (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+      (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+      (codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
+      (codePoint >= 0xff00 && codePoint <= 0xff60) ||
+      (codePoint >= 0xffe0 && codePoint <= 0xffe6))
+  );
 }
 
 function scoreboardWidth() {
@@ -102,10 +421,10 @@ function trueColor(value, foreground, background) {
 function panelLine(left, right = "", options = {}) {
   const innerWidth = Math.max(1, scoreboardWidth() - 4);
   const safeRight = trimLine(right, Math.max(0, innerWidth - 1));
-  const leftWidth = Math.max(0, innerWidth - [...safeRight].length - (safeRight ? 1 : 0));
+  const leftWidth = Math.max(0, innerWidth - displayWidth(safeRight) - (safeRight ? 1 : 0));
   const leftValue = options.leftSegments?.map((segment) => segment.value).join("") ?? left;
   const safeLeft = trimLine(leftValue, leftWidth);
-  const gap = " ".repeat(Math.max(0, innerWidth - [...safeLeft, ...safeRight].length));
+  const gap = " ".repeat(Math.max(0, innerWidth - displayWidth(safeLeft) - displayWidth(safeRight)));
   const borderColor = options.accent ? cliPalette.orange : cliPalette.line;
   let renderedLeft = trueColor(safeLeft, options.leftColor ?? cliPalette.ivory);
 
@@ -114,7 +433,7 @@ function panelLine(left, right = "", options = {}) {
     renderedLeft = options.leftSegments
       .map((segment) => {
         const value = trimLine(segment.value, remaining);
-        remaining -= [...value].length;
+        remaining -= displayWidth(value);
         return trueColor(value, segment.color);
       })
       .join("");
@@ -138,7 +457,7 @@ function printPanel(rows, options = {}) {
 
 function renderConnectionPanel(host) {
   printPanel([
-    { left: "UPLOAD ENDPOINT", right: "CONNECTED", leftColor: cliPalette.muted },
+    { left: message("uploadEndpoint"), right: message("connected"), leftColor: cliPalette.muted },
     { left: host, leftColor: cliPalette.ivory },
   ]);
 }
@@ -149,7 +468,7 @@ function renderSourceProgress(label, completed, total) {
   }
 
   const counter = `${String(completed).padStart(2, "0")} / ${String(total).padStart(2, "0")}`;
-  const line = fitLine(`LOCAL SOURCES  ${counter}  ${label.toUpperCase()}`, scoreboardWidth());
+  const line = fitLine(`${message("localSources")}  ${counter}  ${label.toUpperCase()}`, scoreboardWidth());
   process.stdout.write(`\r${trueColor(line, cliPalette.muted)}`);
 }
 
@@ -164,7 +483,7 @@ function renderSourcesPanel(sourceStats) {
   const skipped = sourceStats.length - active.length;
   const rows = [
     {
-      left: "LOCAL SOURCES",
+      left: message("localSources"),
       right: `${String(sourceStats.length).padStart(2, "0")} / ${String(sourceStats.length).padStart(2, "0")}`,
       leftColor: cliPalette.muted,
       rightColor: cliPalette.muted,
@@ -182,15 +501,15 @@ function renderSourcesPanel(sourceStats) {
         { value: filledBar, color: cliPalette.lime },
         { value: emptyBar, color: cliPalette.muted },
       ],
-      right: hasUsage ? "DONE" : "SKIPPED",
+      right: hasUsage ? message("done") : message("skipped"),
       leftColor: hasUsage ? cliPalette.ivory : cliPalette.muted,
       rightColor: hasUsage ? cliPalette.lime : cliPalette.muted,
     });
   }
 
   rows.push({
-    left: `${active.length} ACTIVE`,
-    right: `${skipped} SKIPPED`,
+    left: `${active.length} ${message("active")}`,
+    right: `${skipped} ${message("skipped")}`,
     leftColor: cliPalette.lime,
     rightColor: cliPalette.muted,
   });
@@ -199,7 +518,7 @@ function renderSourcesPanel(sourceStats) {
 
 function renderPrivacyPanel() {
   printPanel(
-    [{ left: "PRIVATE CONTENT NEVER LEAVES THIS MACHINE", leftColor: cliPalette.orange }],
+    [{ left: message("privacy"), leftColor: cliPalette.orange }],
     { accent: true },
   );
 }
@@ -209,20 +528,20 @@ function logo() {
   const compact = terminalColumns < 72;
   const liveLabel = "TOKEN/RANK // LIVE";
   const liveRank = "01";
-  const liveBand = `${liveLabel}${" ".repeat(Math.max(1, width - [...liveLabel, ...liveRank].length))}${liveRank}`;
+  const liveBand = `${liveLabel}${" ".repeat(Math.max(1, width - displayWidth(liveLabel) - displayWidth(liveRank)))}${liveRank}`;
 
   if (compact) {
     return trueColor(fitLine(liveBand, width), cliPalette.background, cliPalette.lime);
   }
 
-  const burn = "  BURN TOKENS.";
-  const rankGap = " ".repeat(Math.max(1, width - [...burn, ...liveRank].length));
+  const burn = `  ${message("burnTokens")}`;
+  const rankGap = " ".repeat(Math.max(1, width - displayWidth(burn) - displayWidth(liveRank)));
   const lines = [
     trueColor(fitLine(liveBand, width), cliPalette.background, cliPalette.lime),
-    trueColor(fitLine("  PUBLIC RANK SIGNAL", width), cliPalette.muted),
+    trueColor(fitLine(`  ${message("publicRankSignal")}`, width), cliPalette.muted),
     "",
     `${trueColor(burn, cliPalette.ivory)}${rankGap}${trueColor(liveRank, cliPalette.orange)}`,
-    trueColor(fitLine("  ASCEND RANKS.", width), cliPalette.lime),
+    trueColor(fitLine(`  ${message("ascendRanks")}`, width), cliPalette.lime),
   ];
 
   return lines.join("\n");
@@ -235,7 +554,7 @@ async function printLogo() {
 
   if (useAnimation) {
     for (const point of ["○", "●"]) {
-      process.stdout.write(`\r${trueColor(`  ${point} COLLECTOR STARTING`, cliPalette.lime)}`);
+      process.stdout.write(`\r${trueColor(`  ${point} ${message("collectorStarting")}`, cliPalette.lime)}`);
       await sleep(70);
     }
     process.stdout.write("\r\x1b[2K");
@@ -290,7 +609,7 @@ async function renderUploadGrid(completed, total, entryCount) {
   const bar = `${"█".repeat(filled)}${"░".repeat(barWidth - filled)}`;
 
   if (useAnimation && completed < total) {
-    const line = fitLine(`RANK SIGNAL  ${bar}  ${completed}/${total}`, width);
+    const line = fitLine(`${message("rankSignal")}  ${bar}  ${completed}/${total}`, width);
     process.stdout.write(`\r${trueColor(line, cliPalette.lime)}`);
     return;
   }
@@ -301,8 +620,8 @@ async function renderUploadGrid(completed, total, entryCount) {
 
   const percent = Math.round((completed / total) * 100);
   printPanel([
-    { left: "RANK SIGNAL", right: "UPLOAD COMPLETE", leftColor: cliPalette.muted },
-    { left: bar, right: `${percent}% / ${entryCount} ROWS`, leftColor: cliPalette.lime },
+    { left: message("rankSignal"), right: message("uploadComplete"), leftColor: cliPalette.muted },
+    { left: bar, right: `${percent}% / ${entryCount} ${rowLabel(entryCount)}`, leftColor: cliPalette.lime },
   ]);
 }
 
@@ -322,9 +641,9 @@ async function readCliPackageJson(candidates) {
 
 function usage() {
   return [
-    "TokenRank collector",
+    message("usageTitle"),
     "",
-    "Commands:",
+    message("commands"),
     "  tokenrank tools",
     "  tokenrank sources",
     "  tokenrank status",
@@ -338,7 +657,8 @@ function usage() {
     "  tokenrank service status",
     "  tokenrank service uninstall",
     "",
-    "usage.json can be either { entries: [...] } or an array of aggregate entries.",
+    message("language"),
+    message("usageDescription"),
   ].join("\n");
 }
 
@@ -501,7 +821,7 @@ function currentTime() {
   const value = configured ? new Date(configured) : new Date();
 
   if (!Number.isFinite(value.getTime())) {
-    throw new Error("TOKENRANK_NOW 必须是有效时间。");
+    throw new Error(message("invalidNow"));
   }
 
   return value;
@@ -605,7 +925,7 @@ async function readConfig() {
   try {
     return JSON.parse(await readFile(file, "utf8"));
   } catch {
-    throw new Error("请先运行 tokenrank connect <webhook-url>");
+    throw new Error(message("webhookConfigMissing"));
   }
 }
 
@@ -618,12 +938,12 @@ async function writeConfig(config) {
 
 async function removeConfig() {
   await rm(configPath(), { force: true });
-  console.log("已移除本机 webhook 配置。");
+  console.log(message("removedWebhook"));
 }
 
 function requireWebhookUrl(value) {
   if (!value) {
-    throw new Error("缺少 webhook URL。请先在 TokenRank 仪表盘生成 webhook。");
+    throw new Error(message("missingWebhook"));
   }
 
   let url;
@@ -631,11 +951,11 @@ function requireWebhookUrl(value) {
   try {
     url = new URL(value);
   } catch {
-    throw new Error("webhook URL 格式不正确。");
+    throw new Error(message("invalidWebhookUrl"));
   }
 
   if (url.protocol !== "https:" && url.protocol !== "http:") {
-    throw new Error("webhook URL 必须是 http 或 https。");
+    throw new Error(message("invalidWebhookProtocol"));
   }
 
   return url.toString();
@@ -657,7 +977,7 @@ function readOptionalNumber(record, keys) {
 
     if (value !== undefined) {
       if (!Number.isSafeInteger(value) || value < 0) {
-        throw new Error(`${key} 必须是非负整数。`);
+        throw new Error(message("nonNegativeInteger", { key }));
       }
 
       return value;
@@ -678,7 +998,7 @@ function sumNumbers(record, keys) {
     }
 
     if (!Number.isSafeInteger(value) || value < 0) {
-      throw new Error(`${key} 必须是非负整数。`);
+      throw new Error(message("nonNegativeInteger", { key }));
     }
 
     total += value;
@@ -722,20 +1042,20 @@ function isIsoCalendarDate(value) {
 
 function normalizeEntry(rawEntry) {
   if (!rawEntry || typeof rawEntry !== "object" || Array.isArray(rawEntry)) {
-    throw new Error("每条 usage entry 必须是对象。");
+    throw new Error(message("invalidUsageEntry"));
   }
 
   const entry = rawEntry;
   const date = typeof entry.date === "string" ? entry.date : "";
 
   if (!isIsoCalendarDate(date)) {
-    throw new Error("entry.date 必须是 YYYY-MM-DD 格式的真实日期。");
+    throw new Error(message("invalidDate"));
   }
 
   const tool = typeof entry.tool === "string" ? entry.tool : "";
 
   if (!TOOL_KEYS.includes(tool)) {
-    throw new Error(`不支持的工具: ${tool || "(empty)"}`);
+    throw new Error(message("unsupportedTool", { tool: tool || message("unattributedEmpty") }));
   }
 
   const model = normalizeModel(entry.model, tool);
@@ -749,7 +1069,7 @@ function normalizeEntry(rawEntry) {
   const total = providedTotal ?? inferredTotal;
 
   if (total !== inferredTotal && total !== legacyTotal) {
-    throw new Error("total 必须匹配该工具的 Token 统计口径。");
+    throw new Error(message("totalMismatch"));
   }
 
   return {
@@ -1507,7 +1827,7 @@ function getOption(args, name, shortName = null) {
   const value = args[index + 1];
 
   if (!value || value.startsWith("-")) {
-    throw new Error(`缺少 ${name} 参数值。`);
+    throw new Error(message("missingOptionValue", { name }));
   }
 
   return value;
@@ -1518,11 +1838,11 @@ function getScanOptions(args) {
   const since = getOption(args, "--since");
 
   if (tool && !TOOL_KEYS.includes(tool)) {
-    throw new Error(`不支持的工具: ${tool}`);
+    throw new Error(message("unsupportedTool", { tool }));
   }
 
   if (since && !isIsoCalendarDate(since)) {
-    throw new Error("--since 必须是 YYYY-MM-DD。");
+    throw new Error(message("invalidSince"));
   }
 
   return { tool, since };
@@ -1536,8 +1856,10 @@ async function scanLocalUsage(args, options = {}) {
   const sourceStats = [];
 
   if (progress && !useColor) {
-    printSection("Scan local usage");
-    printMuted(`scope: ${tool || "all tools"}${since ? ` since ${since}` : ""}`);
+    printSection(message("scanLocalUsage"));
+    printMuted(
+      `${message("scope", { scope: tool || message("allTools") })}${since ? ` · ${since}` : ""}`,
+    );
   }
 
   for (const [sourceIndex, source] of sources.entries()) {
@@ -1548,7 +1870,7 @@ async function scanLocalUsage(args, options = {}) {
       if (useColor) {
         renderSourceProgress(source.label, sourceIndex + 1, sources.length);
       } else {
-        printStep(`Scanning ${source.label}`, source.tool);
+        printStep(message("scanning", { source: source.label }), source.tool);
       }
     }
 
@@ -1576,7 +1898,9 @@ async function scanLocalUsage(args, options = {}) {
     });
 
     if (progress && !useColor) {
-      printMuted(`   ${source.tool}: ${sourceFileCount} files, ${sourceEntryCount} raw rows`);
+      printMuted(
+        `   ${source.tool}: ${sourceFileCount} ${message("files")}, ${sourceEntryCount} ${rowLabel(sourceEntryCount)}`,
+      );
     }
   }
 
@@ -1591,8 +1915,8 @@ async function scanLocalUsage(args, options = {}) {
       renderPrivacyPanel();
     } else {
       printSuccess(
-        "Scan complete",
-        `${filteredEntries.length} raw rows -> ${uniqueEntries.length} unique -> ${aggregatedEntries.length} aggregate rows`,
+        message("scanComplete"),
+        `${filteredEntries.length} ${rowLabel(filteredEntries.length)} -> ${uniqueEntries.length} ${message("uniqueRows")} -> ${aggregatedEntries.length} ${message("aggregateRows")}`,
       );
     }
   }
@@ -1616,7 +1940,7 @@ function getEntriesInput(raw) {
     return raw.entries;
   }
 
-  throw new Error("usage JSON 必须是数组，或包含 entries 数组。");
+  throw new Error(message("invalidUsageInput"));
 }
 
 function buildUploadPayload(raw) {
@@ -1780,7 +2104,7 @@ function responseFromRawHttp(buffer) {
   const headerEnd = bufferIndexOf(buffer, "\r\n\r\n");
 
   if (headerEnd === -1) {
-    throw new Error("代理响应格式不正确。");
+    throw new Error(message("proxyResponseInvalid"));
   }
 
   const headerText = buffer.subarray(0, headerEnd).toString("ascii");
@@ -1837,7 +2161,7 @@ function requestViaHttpsProxy(targetUrl, proxyUrl, body) {
     proxyRequest.on("connect", (res, socket) => {
       if ((res.statusCode ?? 0) < 200 || (res.statusCode ?? 0) >= 300) {
         socket.destroy();
-        reject(new Error(`代理连接失败: HTTP ${res.statusCode ?? 0}`));
+        reject(new Error(message("proxyConnectionFailed", { status: res.statusCode ?? 0 })));
         return;
       }
 
@@ -1910,7 +2234,7 @@ async function postJson(webhookUrl, payload) {
     return requestViaHttpsProxy(targetUrl, proxyUrl, body);
   }
 
-  throw new Error(`不支持的 webhook 协议: ${targetUrl.protocol}`);
+  throw new Error(message("unsupportedWebhookProtocol", { protocol: targetUrl.protocol }));
 }
 
 function getFileArg(args) {
@@ -1923,7 +2247,7 @@ function getFileArg(args) {
   const file = args[index + 1];
 
   if (!file || file.startsWith("-")) {
-    throw new Error("缺少 --file 后面的 usage.json 路径。");
+    throw new Error(message("missingFile"));
   }
 
   return file;
@@ -1945,18 +2269,18 @@ async function upload(args, options = {}) {
     if (useColor) {
       renderConnectionPanel(new URL(webhookUrl).host);
     } else {
-      printSection("Upload");
-      printStep("Webhook ready", new URL(webhookUrl).origin);
+      printSection(message("upload"));
+      printStep(message("webhookReady"), new URL(webhookUrl).origin);
     }
   }
   const raw = file
     ? JSON.parse(await readFile(file, "utf8"))
     : { entries: await scanLocalUsage(args, { progress: !quiet }) };
   if (file && !quiet) {
-    printStep("Loaded usage file", file);
+    printStep(message("loadedUsageFile"), file);
   }
   if (!quiet && !useColor) {
-    printStep("Build payload");
+    printStep(message("buildPayload"));
   }
   const payload = buildUploadPayload(raw);
   const batches = payload.entries.length
@@ -1967,12 +2291,25 @@ async function upload(args, options = {}) {
     : [payload];
 
   if (!quiet && !useColor) {
-    printStep("Uploading", `${payload.entries.length} rows in ${batches.length} batch(es)`);
+    printStep(
+      message("uploading", {
+        count: payload.entries.length,
+        rows: rowLabel(payload.entries.length),
+        batches: batches.length,
+      }),
+    );
   }
 
   for (const [index, batch] of batches.entries()) {
     if (!quiet && !useColor) {
-      printMuted(`   batch ${index + 1}/${batches.length}: ${batch.entries.length} rows`);
+      printMuted(
+        `   ${message("batch", {
+          current: index + 1,
+          total: batches.length,
+          count: batch.entries.length,
+          rows: rowLabel(batch.entries.length),
+        })}`,
+      );
     }
     const response = await postJson(webhookUrl, batch);
     const responseText = await response.text();
@@ -1986,7 +2323,7 @@ async function upload(args, options = {}) {
 
     if (!response.ok || responseJson?.status !== 0) {
       const error = responseJson?.error || responseText || `HTTP ${response.status}`;
-      throw new Error(`上传失败: ${error}`);
+      throw new Error(message("uploadFailed", { error }));
     }
 
     if (!quiet) {
@@ -1996,9 +2333,14 @@ async function upload(args, options = {}) {
 
   if (!quiet && !useColor) {
     if (terminalIsTty) {
-      printSuccess("UPLOAD COMPLETE", `${payload.entries.length} rows`);
+      printSuccess(message("uploadComplete"), `${payload.entries.length} ${rowLabel(payload.entries.length)}`);
     } else {
-      printSuccess(`上传成功: ${payload.entries.length} 条`);
+      printSuccess(
+        message("uploadSuccess", {
+          count: payload.entries.length,
+          rows: rowLabel(payload.entries.length),
+        }),
+      );
     }
   }
 
@@ -2019,7 +2361,7 @@ function parseInterval(args) {
   const interval = Number(raw);
 
   if (!Number.isSafeInteger(interval) || interval < 60) {
-    throw new Error("--interval 必须是不小于 60 的整数秒。");
+    throw new Error(message("invalidInterval"));
   }
 
   return interval;
@@ -2253,16 +2595,16 @@ async function installService(args = []) {
   }
 
   if (hasLegacyIntervalArg) {
-    console.log(`已忽略 --interval：后台采集时间固定为${collectorScheduleLabel}。`);
+    console.log(message("ignoredInterval", { schedule: message("dailySchedule") }));
   }
-  console.log(`已安装后台服务: ${file}`);
-  console.log(`采集时间: ${collectorScheduleLabel}`);
+  console.log(message("installedBackgroundService", { file }));
+  console.log(message("collectionSchedule", { schedule: message("dailySchedule") }));
 }
 
 async function serviceStatus() {
   const { file } = servicePaths();
   const installed = await serviceInstalled();
-  console.log(installed ? `已安装: ${file}` : "未安装");
+  console.log(installed ? message("installed", { file }) : message("notInstalled"));
 }
 
 async function serviceInstalled() {
@@ -2306,7 +2648,7 @@ async function uninstallService() {
   if (taskFile) {
     await rm(taskFile, { force: true });
   }
-  console.log(`已卸载后台服务: ${file}`);
+  console.log(message("uninstallService", { file }));
 }
 
 function nextScheduleBoundary(now = currentTime()) {
@@ -2327,11 +2669,11 @@ async function statusCommand() {
 
   const state = await readServiceState();
   const installed = await serviceInstalled();
-  console.log(connected ? "CONNECTED" : "NOT CONNECTED");
-  console.log(installed ? "SERVICE INSTALLED" : "SERVICE NOT INSTALLED");
-  console.log(`LAST SUCCESS\t${state.lastSuccessfulAt ?? "NEVER"}`);
-  console.log(`LAST ERROR\t${state.lastErrorCode ?? "NONE"}`);
-  console.log(`NEXT BOUNDARY\t${nextScheduleBoundary().toISOString()}`);
+  console.log(connected ? message("connected") : message("notConnected"));
+  console.log(installed ? message("serviceInstalled") : message("serviceNotInstalled"));
+  console.log(`${message("lastSuccess")}\t${state.lastSuccessfulAt ?? message("never")}`);
+  console.log(`${message("lastError")}\t${state.lastErrorCode ?? message("none")}`);
+  console.log(`${message("nextBoundary")}\t${nextScheduleBoundary().toISOString()}`);
 }
 
 async function doctorCommand() {
@@ -2363,15 +2705,17 @@ async function doctorCommand() {
     }
 
     const status = failed
-      ? "ERROR"
+      ? message("error")
       : rows > 0
-        ? "READY"
+        ? message("ready")
         : source.tool === "cursor"
-          ? "EXACT SOURCE REQUIRED"
+          ? message("exactSourceRequired")
           : files > 0
-            ? "DETECTED / NO TOKEN ROWS"
-            : "UNAVAILABLE";
-    console.log(`${source.tool}\t${status}\t${files} files\t${rows} rows`);
+            ? message("detectedNoRows")
+            : message("unavailable");
+    console.log(
+      `${source.tool}\t${status}\t${files} ${message("files")}\t${rows} ${rowLabel(rows)}`,
+    );
   }
 }
 
@@ -2450,7 +2794,7 @@ async function preview(args) {
   }
 
   if (!entries.length) {
-    console.log("没有发现可上传的本地 token 统计。");
+    console.log(message("noLocalUsage"));
     return;
   }
 
@@ -2460,29 +2804,29 @@ async function preview(args) {
 }
 
 async function main() {
-  const [command, ...args] = process.argv.slice(2);
+  const [command, ...args] = parseGlobalOptions(process.argv.slice(2));
 
   switch (command) {
     case "tools":
       await printLogo();
-      printSection("SUPPORTED TOOLS");
+      printSection(message("supportedTools"));
       for (const tool of TOOL_KEYS) {
         console.log(`${trueColor("•", cliPalette.lime)} ${tool}`);
       }
       return;
     case "sources":
       await printLogo();
-      printSection("Local source adapters");
+      printSection(message("localSourceAdapters"));
       printSources();
       return;
     case "status":
       await printLogo();
-      printSection("GRID STATUS");
+      printSection(message("gridStatus"));
       await statusCommand();
       return;
     case "doctor":
       await printLogo();
-      printSection("SOURCE DIAGNOSTICS");
+      printSection(message("sourceDiagnostics"));
       await doctorCommand();
       return;
     case "preview":
@@ -2492,13 +2836,13 @@ async function main() {
       const compact = process.env.TOKENRANK_NO_LOGO === "1";
       if (!compact) {
         await printLogo();
-        printSection("Connect");
+        printSection(message("connect"));
       }
       const webhookUrl = requireWebhookUrl(args[0]);
       await writeConfig({ webhookUrl, connectedAt: new Date().toISOString() });
-      printSuccess("已保存 webhook。");
+      printSuccess(message("savedWebhook"));
       if (!compact) {
-        printMuted("next: tokenrank upload");
+        printMuted(message("nextUpload"));
       }
       return;
     }
@@ -2530,7 +2874,7 @@ async function main() {
         return;
       }
 
-      throw new Error("未知 service 命令。");
+      throw new Error(message("unknownServiceCommand"));
     case undefined:
     case "-h":
     case "--help":
@@ -2538,7 +2882,7 @@ async function main() {
       console.log(usage());
       return;
     default:
-      throw new Error(`未知命令: ${command}\n\n${usage()}`);
+      throw new Error(`${message("unknownCommand", { command })}\n\n${usage()}`);
   }
 }
 
