@@ -120,8 +120,10 @@ function cliEnv(home: string, extraEnv: NodeJS.ProcessEnv = {}) {
     XDG_DATA_HOME: path.join(home, ".local", "share"),
     CODEX_HOME: path.join(home, ".codex"),
     GEMINI_CLI_HOME: path.join(home, ".gemini"),
+    TOKENRANK_TEST_PLATFORM: "win32",
     TOKENRANK_SERVICE_NO_REGISTER: "1",
     TOKENRANK_LANG: "en",
+    TZ: "Asia/Shanghai",
     ...extraEnv,
   };
 }
