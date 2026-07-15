@@ -61,13 +61,11 @@ if ($env:TOKENRANK_WEBHOOK_URL) {
   $env:TOKENRANK_NO_LOGO = "1"
   & $cmdPath connect $env:TOKENRANK_WEBHOOK_URL
   if ($LASTEXITCODE) { exit $LASTEXITCODE }
-  if ($null -eq $previousTokenrankNoLogo) { Remove-Item Env:TOKENRANK_NO_LOGO -ErrorAction SilentlyContinue } else { $env:TOKENRANK_NO_LOGO = $previousTokenrankNoLogo }
-  & $cmdPath upload
-  if ($LASTEXITCODE) { exit $LASTEXITCODE }
-  $env:TOKENRANK_NO_LOGO = "1"
   & $cmdPath service install
   if ($LASTEXITCODE) { exit $LASTEXITCODE }
   if ($null -eq $previousTokenrankNoLogo) { Remove-Item Env:TOKENRANK_NO_LOGO -ErrorAction SilentlyContinue } else { $env:TOKENRANK_NO_LOGO = $previousTokenrankNoLogo }
+  & $cmdPath upload
+  if ($LASTEXITCODE) { exit $LASTEXITCODE }
 } else {
   & $cmdPath tools
   if ($LASTEXITCODE) { exit $LASTEXITCODE }

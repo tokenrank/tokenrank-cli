@@ -708,7 +708,12 @@ describe("tokenrank collector CLI", () => {
         id: "cursor-request-1",
         timestamp: "2026-07-12T05:00:00.000Z",
         model: "claude-sonnet-4",
-        tokenUsage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 10, cacheWriteTokens: 5 },
+        tokenUsage: {
+          inputTokens: 9_000,
+          outputTokens: 2_000,
+          cacheReadTokens: 1_000,
+          cacheWriteTokens: 500,
+        },
       },
     ]);
 
@@ -883,6 +888,115 @@ describe("tokenrank collector CLI", () => {
         total: 15,
       }),
     ]);
+  });
+
+  it(
+    "streams large Codex JSONL histories under constrained memory",
+    async () => {
+      const home = await tempHome();
+      const file = path.join(home, ".codex", "sessions", "large-codex.jsonl");
+      await mkdir(path.dirname(file), { recursive: true });
+
+      const context = JSON.stringify({
+        type: "turn_context",
+        payload: { model: "gpt-5.2-codex" },
+      });
+      const filler = `${JSON.stringify({ type: "noop" })}\n`.repeat(1_500_000);
+      const usage = JSON.stringify({
+        timestamp: "2026-06-23T08:01:00.000Z",
+        type: "response_item",
+        payload: { usage: { input_tokens: 10, output_tokens: 5 } },
+      });
+      await writeFile(file, `${context}\n${filler}${usage}\n`);
+
+      const { stdout } = await runCli(["preview", "--json", "--tool", "codex"], home, {
+        NODE_OPTIONS: "--max-old-space-size=32",
+      });
+      const payload = JSON.parse(stdout) as { entries: Array<{ model: string; total: number }> };
+
+      expect(payload.entries).toEqual([
+        expect.objectContaining({ model: "gpt-5.2-codex", total: 15 }),
+      ]);
+    },
+    30_000,
+  );
+
+  it("skips oversized or malformed JSONL records and continues across CRLF chunks", async () => {
+    const home = await tempHome();
+    const file = path.join(home, ".codex", "sessions", "bounded-lines.jsonl");
+    await mkdir(path.dirname(file), { recursive: true });
+
+    const context = JSON.stringify({
+      type: "turn_context",
+      payload: { model: "gpt-5.2-codex" },
+    });
+    const oversized = JSON.stringify({
+      timestamp: "2026-06-23T08:00:00.000Z",
+      ignoredPrivateContent: "x".repeat(2_000),
+      usage: { input_tokens: 1_000, output_tokens: 500 },
+    });
+    const usage = JSON.stringify({
+      timestamp: "2026-06-23T08:01:00.000Z",
+      type: "response_item",
+      payload: { usage: { input_tokens: 10, output_tokens: 5 } },
+    });
+    await writeFile(file, `${context}\r\n${oversized}\r\nnot-json\r\n${usage}`);
+
+    const { stdout } = await runCli(["preview", "--json", "--tool", "codex"], home, {
+      TOKENRANK_MAX_JSONL_LINE_BYTES: "512",
+    });
+    const payload = JSON.parse(stdout) as { entries: Array<{ model: string; total: number }> };
+
+    expect(payload.entries).toEqual([
+      expect.objectContaining({ model: "gpt-5.2-codex", total: 15 }),
+    ]);
+  });
+
+  it(
+    "aggregates high-volume Codex usage without retaining every event",
+    async () => {
+      const home = await tempHome();
+      const file = path.join(home, ".codex", "sessions", "high-volume-codex.jsonl");
+      await mkdir(path.dirname(file), { recursive: true });
+
+      const usage = `${JSON.stringify({
+        timestamp: "2026-06-23T08:01:00.000Z",
+        type: "response_item",
+        payload: {
+          model: "gpt-5.2-codex",
+          usage: { input_tokens: 10, output_tokens: 5 },
+        },
+      })}\n`;
+      await writeFile(file, usage.repeat(200_000));
+
+      const { stdout } = await runCli(["preview", "--json", "--tool", "codex"], home);
+      const payload = JSON.parse(stdout) as { entries: Array<{ model: string; total: number }> };
+
+      expect(payload.entries).toEqual([
+        expect.objectContaining({ model: "gpt-5.2-codex", total: 3_000_000 }),
+      ]);
+    },
+    30_000,
+  );
+
+  it("fails safely instead of uploading token totals beyond the safe integer range", async () => {
+    const home = await tempHome();
+    await writeJsonLines(home, ".codex/sessions/overflow.jsonl", [
+      {
+        timestamp: "2026-06-23T08:01:00.000Z",
+        model: "gpt-5.2-codex",
+        usage: { input_tokens: 5_000_000_000_000_000, output_tokens: 0 },
+      },
+      {
+        timestamp: "2026-06-23T08:02:00.000Z",
+        model: "gpt-5.2-codex",
+        usage: { input_tokens: 5_000_000_000_000_000, output_tokens: 0 },
+      },
+    ]);
+
+    await expect(runCli(["preview", "--json", "--tool", "codex"], home)).rejects.toMatchObject({
+      stderr: expect.stringContaining("safe integer range"),
+    });
   });
 
   it("does not carry a JSONL event id into later usage rows", async () => {
