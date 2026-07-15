@@ -1,0 +1,40 @@
+{
+  "name": "tokenrank",
+  "version": "0.1.0",
+  "description": "TokenRank local AI token usage collector",
+  "type": "module",
+  "bin": {
+    "tokenrank": "bin/tokenrank.mjs"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "check": "node --check bin/tokenrank.mjs",
+    "lint": "eslint bin/tokenrank.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "tokenrank": "node bin/tokenrank.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/solosaas/tokenrank-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/solosaas/tokenrank-cli/issues"
+  },
+  "homepage": "https://tokenrank.org",
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "@types/node": "^20.19.43",
+    "eslint": "^9.39.4",
+    "globals": "^16.5.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.9"
+  }
+}
