@@ -1,5 +1,11 @@
 # 更新日志
 
+## 2026-07-16
+
+- 将 JSONL 来源改为有单行上限的逐行流式解析，并把日期过滤、精确去重和日维度聚合合并为单次流水线，避免长期 Codex 历史触发 `Invalid string length`、堆内存耗尽或大数组展开溢出。
+- 对异常超长、损坏、CRLF 和无末尾换行的 JSONL 记录进行隔离处理；增加 Token 安全整数校验，避免上传失真的聚合值。
+- macOS/Linux 与 Windows 安装器在首次上传前先安装后台服务；即使即时上传失败，后续计划任务仍可自动重试。
+
 ## 2026-07-15
 
 - 将项目公开迁移到 `tokenrank/tokenrank-cli`，采用 MIT License 开源，并更新安装器、文档和 package metadata 中的仓库地址。

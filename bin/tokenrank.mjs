@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
+import { createReadStream } from "node:fs";
 import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
@@ -35,6 +36,8 @@ const TOOL_KEYS = [
   "continue",
 ];
 const CACHE_INCLUDED_INPUT_TOOLS = new Set(["codex"]);
+const DEFAULT_MAX_JSONL_LINE_BYTES = 64 * 1024 * 1024;
+const DEFAULT_MAX_JSON_DOCUMENT_BYTES = 64 * 1024 * 1024;
 const cliMessages = {
   en: {
     active: "ACTIVE",
@@ -84,6 +87,7 @@ const cliMessages = {
     notConnected: "NOT CONNECTED",
     notInstalled: "Not installed",
     nonNegativeInteger: "{key} must be a non-negative integer.",
+    tokenSumOverflow: "Token totals exceed JavaScript's safe integer range.",
     privacy: "PRIVATE CONTENT NEVER LEAVES THIS MACHINE",
     proxyConnectionFailed: "Proxy connection failed: HTTP {status}",
     proxyResponseInvalid: "The proxy response is invalid.",
@@ -172,6 +176,7 @@ const cliMessages = {
     notConnected: "未连接",
     notInstalled: "未安装",
     nonNegativeInteger: "{key} 必须是非负整数。",
+    tokenSumOverflow: "Token 总数超出 JavaScript 安全整数范围。",
     privacy: "私密内容绝不离开本机",
     proxyConnectionFailed: "代理连接失败：HTTP {status}",
     proxyResponseInvalid: "代理响应格式不正确。",
@@ -987,6 +992,22 @@ function readOptionalNumber(record, keys) {
   return null;
 }
 
+function safeTokenSum(...values) {
+  let total = 0;
+
+  for (const value of values) {
+    const next = total + value;
+
+    if (!Number.isSafeInteger(next) || next < 0) {
+      throw new Error(message("tokenSumOverflow"));
+    }
+
+    total = next;
+  }
+
+  return total;
+}
+
 function sumNumbers(record, keys) {
   let total = 0;
 
@@ -1001,7 +1022,7 @@ function sumNumbers(record, keys) {
       throw new Error(message("nonNegativeInteger", { key }));
     }
 
-    total += value;
+    total = safeTokenSum(total, value);
   }
 
   return total;
@@ -1017,14 +1038,14 @@ function inputIncludesCacheRead(tool) {
 
 function canonicalTotalFor(tool, input, output, cacheRead, cacheWrite) {
   if (inputIncludesCacheRead(tool)) {
-    return input + output;
+    return safeTokenSum(input, output);
   }
 
-  return input + output + cacheRead + cacheWrite;
+  return safeTokenSum(input, output, cacheRead, cacheWrite);
 }
 
 function legacySummedTotal(input, output, cacheRead, cacheWrite) {
-  return input + output + cacheRead + cacheWrite;
+  return safeTokenSum(input, output, cacheRead, cacheWrite);
 }
 
 function isIsoCalendarDate(value) {
@@ -1490,30 +1511,90 @@ async function collectFiles(root, maxFiles = 1000, options = {}) {
   return files;
 }
 
-function attachSourceMetadata(entries, file, source) {
-  return entries.map((entry, index) => ({
+function sourceEntry(entry, file, source, index) {
+  return {
     ...entry,
     sourceId: source.id,
     sourcePriority: source.priority,
     sourceRecordId: `${file}:${index}`,
-  }));
+  };
 }
 
-async function readUsageFile(file, tool, source = { id: `${tool}-local`, priority: 100 }) {
-  const fileStat = await stat(file);
-  const fallbackDate = fileStat.mtime.toISOString().slice(0, 10);
+function configuredByteLimit(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
 
-  if (file.endsWith(".db") || file.endsWith(".sqlite")) {
-    return attachSourceMetadata(await readSqliteUsage(file, tool, fallbackDate), file, source);
+async function* readBoundedLines(file) {
+  const maxLineBytes = configuredByteLimit(
+    "TOKENRANK_MAX_JSONL_LINE_BYTES",
+    DEFAULT_MAX_JSONL_LINE_BYTES,
+  );
+  const input = createReadStream(file, { encoding: "utf8" });
+  let parts = [];
+  let bufferedBytes = 0;
+  let discardUntilNewline = false;
+
+  for await (const chunk of input) {
+    let start = 0;
+
+    while (start < chunk.length) {
+      const newline = chunk.indexOf("\n", start);
+      const end = newline === -1 ? chunk.length : newline;
+      const part = chunk.slice(start, end);
+
+      if (!discardUntilNewline) {
+        const partBytes = Buffer.byteLength(part);
+
+        if (bufferedBytes + partBytes > maxLineBytes) {
+          parts = [];
+          bufferedBytes = 0;
+          discardUntilNewline = true;
+        } else {
+          parts.push(part);
+          bufferedBytes += partBytes;
+        }
+      }
+
+      if (newline === -1) {
+        break;
+      }
+
+      if (!discardUntilNewline) {
+        const line = parts.join("");
+        yield line.endsWith("\r") ? line.slice(0, -1) : line;
+      }
+
+      parts = [];
+      bufferedBytes = 0;
+      discardUntilNewline = false;
+      start = newline + 1;
+    }
   }
 
-  const text = await readFile(file, "utf8");
+  if (!discardUntilNewline && parts.length) {
+    const line = parts.join("");
+    yield line.endsWith("\r") ? line.slice(0, -1) : line;
+  }
+}
+
+async function* readUsageFile(file, tool, source = { id: `${tool}-local`, priority: 100 }) {
+  const fileStat = await stat(file);
+  const fallbackDate = fileStat.mtime.toISOString().slice(0, 10);
+  let recordIndex = 0;
+
+  if (file.endsWith(".db") || file.endsWith(".sqlite")) {
+    for (const entry of await readSqliteUsage(file, tool, fallbackDate)) {
+      yield sourceEntry(entry, file, source, recordIndex);
+      recordIndex += 1;
+    }
+    return;
+  }
 
   if (file.endsWith(".jsonl")) {
-    const entries = [];
     let context = { date: fallbackDate, model: null };
 
-    for (const line of text.split("\n")) {
+    for await (const line of readBoundedLines(file)) {
       const trimmed = line.trim();
 
       if (!trimmed) {
@@ -1524,33 +1605,48 @@ async function readUsageFile(file, tool, source = { id: `${tool}-local`, priorit
         const value = JSON.parse(trimmed);
         const copilotEntries =
           tool === "github-copilot" ? extractCopilotOtelEntries(value, fallbackDate) : [];
-        entries.push(
-          ...(copilotEntries.length
-            ? copilotEntries
-            : extractEntriesFromValue(value, tool, fallbackDate, context)),
-        );
+        const extractedEntries = copilotEntries.length
+          ? copilotEntries
+          : extractEntriesFromValue(value, tool, fallbackDate, context);
+
+        for (const entry of extractedEntries) {
+          yield sourceEntry(entry, file, source, recordIndex);
+          recordIndex += 1;
+        }
         context = extractContextFromValue(value, context);
       } catch {
         continue;
       }
     }
 
-    return attachSourceMetadata(entries, file, source);
+    return;
   }
+
+  const maxDocumentBytes = configuredByteLimit(
+    "TOKENRANK_MAX_JSON_DOCUMENT_BYTES",
+    DEFAULT_MAX_JSON_DOCUMENT_BYTES,
+  );
+
+  if (fileStat.size > maxDocumentBytes) {
+    return;
+  }
+
+  const text = await readFile(file, "utf8");
 
   try {
     const value = JSON.parse(text);
     const copilotEntries =
       tool === "github-copilot" ? extractCopilotOtelEntries(value, fallbackDate) : [];
-    return attachSourceMetadata(
-      copilotEntries.length
-        ? copilotEntries
-        : extractEntriesFromValue(value, tool, fallbackDate),
-      file,
-      source,
-    );
+    const extractedEntries = copilotEntries.length
+      ? copilotEntries
+      : extractEntriesFromValue(value, tool, fallbackDate);
+
+    for (const entry of extractedEntries) {
+      yield sourceEntry(entry, file, source, recordIndex);
+      recordIndex += 1;
+    }
   } catch {
-    return [];
+    return;
   }
 }
 
@@ -1745,29 +1841,7 @@ async function readSqliteUsage(file, tool, fallbackDate) {
   return entries;
 }
 
-function aggregateEntries(entries) {
-  const rows = new Map();
-
-  for (const entry of entries.map(normalizeEntry)) {
-    const key = `${entry.date}\u0000${entry.tool}\u0000${entry.model}`;
-    const current =
-      rows.get(key) ?? {
-        ...entry,
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        total: 0,
-      };
-
-    current.input += entry.input;
-    current.output += entry.output;
-    current.cacheRead += entry.cacheRead;
-    current.cacheWrite += entry.cacheWrite;
-    current.total += entry.total;
-    rows.set(key, current);
-  }
-
+function sortedAggregateRows(rows) {
   return [...rows.values()].sort((a, b) => {
     const dateOrder = a.date.localeCompare(b.date);
 
@@ -1802,19 +1876,87 @@ function usageFingerprint(event) {
   return createHash("sha256").update(stable).digest("hex");
 }
 
-function dedupeUsageEvents(events) {
+function createUsageAccumulator() {
+  const rows = new Map();
   const claimed = new Map();
+  let filteredCount = 0;
+  let uniqueCount = 0;
 
-  for (const event of events) {
-    const fingerprint = event.fingerprint ?? usageFingerprint(event);
-    const current = claimed.get(fingerprint);
+  function applyToAggregate(entry, direction) {
+    const key = `${entry.date}\u0000${entry.tool}\u0000${entry.model}`;
+    const current =
+      rows.get(key) ?? {
+        ...entry,
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 0,
+      };
 
-    if (!current || (event.sourcePriority ?? 0) > (current.sourcePriority ?? 0)) {
-      claimed.set(fingerprint, { ...event, fingerprint });
+    for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"]) {
+      const next = current[key] + direction * entry[key];
+
+      if (!Number.isSafeInteger(next) || next < 0) {
+        throw new Error(message("tokenSumOverflow"));
+      }
+
+      current[key] = next;
+    }
+
+    if (
+      current.input === 0 &&
+      current.output === 0 &&
+      current.cacheRead === 0 &&
+      current.cacheWrite === 0 &&
+      current.total === 0
+    ) {
+      rows.delete(key);
+    } else {
+      rows.set(key, current);
     }
   }
 
-  return [...claimed.values()];
+  function add(event) {
+    filteredCount += 1;
+    const entry = normalizeEntry(event);
+    const fingerprint = event.fingerprint ?? (event.providerEventId ? usageFingerprint(event) : null);
+
+    if (!fingerprint) {
+      applyToAggregate(entry, 1);
+      uniqueCount += 1;
+      return;
+    }
+
+    const current = claimed.get(fingerprint);
+
+    if (!current || (event.sourcePriority ?? 0) > (current.sourcePriority ?? 0)) {
+      if (current) {
+        applyToAggregate(current.entry, -1);
+      } else {
+        uniqueCount += 1;
+      }
+
+      claimed.set(fingerprint, {
+        entry,
+        sourcePriority: event.sourcePriority ?? 0,
+      });
+      applyToAggregate(entry, 1);
+    }
+  }
+
+  return {
+    add,
+    get filteredCount() {
+      return filteredCount;
+    },
+    get uniqueCount() {
+      return uniqueCount;
+    },
+    values() {
+      return sortedAggregateRows(rows);
+    },
+  };
 }
 
 function getOption(args, name, shortName = null) {
@@ -1850,7 +1992,7 @@ function getScanOptions(args) {
 
 async function scanLocalUsage(args, options = {}) {
   const { tool, since } = getScanOptions(args);
-  const entries = [];
+  const accumulator = createUsageAccumulator();
   const progress = Boolean(options.progress);
   const sources = sourceDefinitions().filter((source) => !tool || source.tool === tool);
   const sourceStats = [];
@@ -1881,12 +2023,16 @@ async function scanLocalUsage(args, options = {}) {
       sourceFileCount += files.length;
 
       for (const file of files) {
-        const fileEntries = await readUsageFile(file, source.tool, {
+        for await (const entry of readUsageFile(file, source.tool, {
           id: source.id ?? `${source.tool}-local`,
           priority: source.priority ?? 100,
-        });
-        sourceEntryCount += fileEntries.length;
-        entries.push(...fileEntries);
+        })) {
+          sourceEntryCount += 1;
+
+          if (!since || entry.date >= since) {
+            accumulator.add(entry);
+          }
+        }
       }
     }
 
@@ -1904,9 +2050,7 @@ async function scanLocalUsage(args, options = {}) {
     }
   }
 
-  const filteredEntries = since ? entries.filter((entry) => entry.date >= since) : entries;
-  const uniqueEntries = dedupeUsageEvents(filteredEntries);
-  const aggregatedEntries = aggregateEntries(uniqueEntries);
+  const aggregatedEntries = accumulator.values();
 
   if (progress) {
     if (useColor) {
@@ -1916,7 +2060,7 @@ async function scanLocalUsage(args, options = {}) {
     } else {
       printSuccess(
         message("scanComplete"),
-        `${filteredEntries.length} ${rowLabel(filteredEntries.length)} -> ${uniqueEntries.length} ${message("uniqueRows")} -> ${aggregatedEntries.length} ${message("aggregateRows")}`,
+        `${accumulator.filteredCount} ${rowLabel(accumulator.filteredCount)} -> ${accumulator.uniqueCount} ${message("uniqueRows")} -> ${aggregatedEntries.length} ${message("aggregateRows")}`,
       );
     }
   }
@@ -2692,12 +2836,13 @@ async function doctorCommand() {
 
       for (const file of sourceFiles) {
         try {
-          rows += (
-            await readUsageFile(file, source.tool, {
-              id: source.id ?? `${source.tool}-local`,
-              priority: source.priority ?? 100,
-            })
-          ).length;
+          for await (const _entry of readUsageFile(file, source.tool, {
+            id: source.id ?? `${source.tool}-local`,
+            priority: source.priority ?? 100,
+          })) {
+            void _entry;
+            rows += 1;
+          }
         } catch {
           failed = true;
         }

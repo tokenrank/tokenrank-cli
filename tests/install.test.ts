@@ -12,6 +12,9 @@ describe("standalone installers", () => {
     expect(script).toContain("${release_base}/tokenrank.mjs");
     expect(script).toContain("TOKENRANK_WEBHOOK_URL");
     expect(script).toContain('"${bin_dir}/tokenrank" service install');
+    expect(script.indexOf('"${bin_dir}/tokenrank" service install')).toBeLessThan(
+      script.indexOf('"${bin_dir}/tokenrank" upload'),
+    );
   });
 
   it("fails with an actionable Unix permissions message", async () => {
@@ -30,5 +33,8 @@ describe("standalone installers", () => {
     expect(script).toContain('[Environment]::SetEnvironmentVariable("Path", $updatedUserPath, "User")');
     expect(script).toContain("TOKENRANK_WEBHOOK_URL");
     expect(script).toContain("& $cmdPath service install");
+    expect(script.indexOf("& $cmdPath service install")).toBeLessThan(
+      script.indexOf("& $cmdPath upload"),
+    );
   });
 });
