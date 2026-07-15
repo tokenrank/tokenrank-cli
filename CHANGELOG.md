@@ -2,6 +2,7 @@
 
 ## 2026-07-15
 
+- 将项目公开迁移到 `tokenrank/tokenrank-cli`，采用 MIT License 开源，并更新安装器、文档和 package metadata 中的仓库地址。
 - 从 TokenRank Web 主仓库拆出独立 CLI 项目，保留 collector 源码历史，并建立独立版本、测试、CI 与 GitHub Release 流程。
 - 将 macOS/Linux 与 Windows 安装逻辑迁入 CLI 项目；TokenRank Web 安装入口只负责注入用户 webhook 并调用最新 CLI release。
 - 明确 CLI 与 Web 之间的上传 API 契约，新增工具 key 或修改 payload 时需先完成服务端兼容。

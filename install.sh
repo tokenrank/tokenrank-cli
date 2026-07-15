@@ -6,7 +6,7 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
-release_base="${TOKENRANK_RELEASE_BASE_URL:-https://github.com/solosaas/tokenrank-cli/releases/latest/download}"
+release_base="${TOKENRANK_RELEASE_BASE_URL:-https://github.com/tokenrank/tokenrank-cli/releases/latest/download}"
 install_dir="${TOKENRANK_HOME:-${HOME}/.tokenrank}"
 bin_dir="${TOKENRANK_BIN_DIR:-${install_dir}/bin}"
 

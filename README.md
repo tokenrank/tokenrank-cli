@@ -23,11 +23,11 @@ irm "https://tokenrank.org/install.ps1" | iex
 也可以直接使用本仓库最新 release 的安装器：
 
 ```bash
-curl -fsSL "https://github.com/solosaas/tokenrank-cli/releases/latest/download/install.sh" | bash
+curl -fsSL "https://github.com/tokenrank/tokenrank-cli/releases/latest/download/install.sh" | bash
 ```
 
 ```powershell
-irm "https://github.com/solosaas/tokenrank-cli/releases/latest/download/install.ps1" | iex
+irm "https://github.com/tokenrank/tokenrank-cli/releases/latest/download/install.ps1" | iex
 ```
 
 CLI 需要 Node.js 20 或更高版本。
@@ -112,3 +112,7 @@ CLI 可以独立发布修复和数据源适配器。新增工具 key 或修改 p
 4. GitHub Actions 自动创建 release，并附加 `tokenrank.mjs`、`package.json`、`install.sh`、`install.ps1`。
 
 `tokenrank.org/install.sh` 和 `tokenrank.org/install.ps1` 会继续作为稳定入口，并转交给本仓库最新 release。
+
+## 开源许可
+
+本项目采用 [MIT License](LICENSE) 开源。

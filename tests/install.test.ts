@@ -6,7 +6,7 @@ describe("standalone installers", () => {
   it("owns the Unix installation and optional onboarding flow", async () => {
     const script = await readFile("install.sh", "utf8");
 
-    expect(script).toContain("solosaas/tokenrank-cli/releases/latest/download");
+    expect(script).toContain("tokenrank/tokenrank-cli/releases/latest/download");
     expect(script).toContain("${HOME}/.tokenrank");
     expect(script).toContain("${install_dir}/bin");
     expect(script).toContain("${release_base}/tokenrank.mjs");
@@ -25,7 +25,7 @@ describe("standalone installers", () => {
   it("owns the Windows installation, PATH update, and optional onboarding flow", async () => {
     const script = await readFile("install.ps1", "utf8");
 
-    expect(script).toContain("solosaas/tokenrank-cli/releases/latest/download");
+    expect(script).toContain("tokenrank/tokenrank-cli/releases/latest/download");
     expect(script).toContain("tokenrank.cmd");
     expect(script).toContain('[Environment]::SetEnvironmentVariable("Path", $updatedUserPath, "User")');
     expect(script).toContain("TOKENRANK_WEBHOOK_URL");

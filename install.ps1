@@ -9,7 +9,7 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
 $releaseBase = if ($env:TOKENRANK_RELEASE_BASE_URL) {
   $env:TOKENRANK_RELEASE_BASE_URL.TrimEnd('/')
 } else {
-  "https://github.com/solosaas/tokenrank-cli/releases/latest/download"
+  "https://github.com/tokenrank/tokenrank-cli/releases/latest/download"
 }
 $installDir = if ($env:TOKENRANK_HOME) { $env:TOKENRANK_HOME } else { Join-Path $env:USERPROFILE ".tokenrank" }
 $cmdPath = Join-Path $installDir "tokenrank.cmd"
