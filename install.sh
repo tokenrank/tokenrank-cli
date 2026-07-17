@@ -39,8 +39,8 @@ fi
 
 if [[ -n "${TOKENRANK_WEBHOOK_URL:-}" ]]; then
   TOKENRANK_NO_LOGO=1 "${bin_dir}/tokenrank" connect "${TOKENRANK_WEBHOOK_URL}"
-  TOKENRANK_NO_LOGO=1 "${bin_dir}/tokenrank" service install
   "${bin_dir}/tokenrank" upload
+  TOKENRANK_NO_LOGO=1 "${bin_dir}/tokenrank" service install
 else
   "${bin_dir}/tokenrank" tools
 fi

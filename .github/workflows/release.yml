@@ -19,6 +19,14 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          test "${GITHUB_REF_NAME}" = "${expected}" || {
+            echo "Tag ${GITHUB_REF_NAME} does not match package version ${expected}." >&2
+            exit 1
+          }
       - run: pnpm check
       - run: pnpm lint
       - run: pnpm typecheck

@@ -1,13 +1,14 @@
 import { createServer as createHttpsServer } from "node:https";
 import { createServer, type IncomingMessage } from "node:http";
+import { createHash } from "node:crypto";
 import { connect as connectSocket } from "node:net";
-import { access, copyFile, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { access, copyFile, mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { hostname, tmpdir } from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 const TOOL_KEYS = [
   "codex",
@@ -32,6 +33,20 @@ const TOOL_KEYS = [
 
 const execFileAsync = promisify(execFile);
 const cliPath = path.resolve("bin/tokenrank.mjs");
+const TEST_ACCOUNT_ID = "a".repeat(64);
+
+function respondToIdentityRequest(
+  request: IncomingMessage,
+  response: import("node:http").ServerResponse,
+  accountId = TEST_ACCOUNT_ID,
+) {
+  if (request.method !== "GET") {
+    return false;
+  }
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end(JSON.stringify({ status: 0, accountId }));
+  return true;
+}
 
 type NodeSqliteModule = {
   DatabaseSync: new (file: string, options?: { readOnly?: boolean }) => {
@@ -147,8 +162,67 @@ async function runInstalledCli(args: string[], home: string) {
   });
 }
 
+const temporaryHomes = new Set<string>();
+
+afterEach(async () => {
+  await Promise.all(
+    [...temporaryHomes].map(async (home) => {
+      temporaryHomes.delete(home);
+      await rm(home, { recursive: true, force: true });
+    }),
+  );
+});
+
 async function tempHome() {
-  return mkdtemp(path.join(tmpdir(), "tokenrank-cli-"));
+  const home = await mkdtemp(path.join(tmpdir(), "tokenrank-cli-"));
+  temporaryHomes.add(home);
+  return home;
+}
+
+async function runCliFailure(args: string[], home: string, extraEnv: NodeJS.ProcessEnv = {}) {
+  try {
+    await runCli(args, home, extraEnv);
+    throw new Error("expected CLI command to fail");
+  } catch (error) {
+    return error as Error & { code: number; stdout: string; stderr: string };
+  }
+}
+
+function testDeviceId(home: string) {
+  const digest = createHash("sha256").update(`${hostname()}:${home}`).digest("hex").slice(0, 32);
+  return `tokenrank-${digest}`;
+}
+
+function testEndpointId(webhookUrl: string) {
+  return createHash("sha256").update(new URL(webhookUrl).toString()).digest("hex");
+}
+
+async function seedSuccessfulFullState(
+  home: string,
+  webhookUrl: string,
+  overrides: Record<string, unknown> = {},
+) {
+  const stateDir = path.join(home, ".tokenrank");
+  await mkdir(stateDir, { recursive: true });
+  await writeFile(
+    path.join(stateDir, "aggregate-state.json"),
+    `${JSON.stringify(
+      {
+        accountingVersion: 2,
+        deviceId: testDeviceId(home),
+        accountId: TEST_ACCOUNT_ID,
+        endpointId: testEndpointId(webhookUrl),
+        lastFullSyncDate: "2026-06-23",
+        aggregates: {},
+        cutoverDate: "2026-06-23",
+        revision: 1,
+        updatedAt: "2026-06-23T08:00:00.000Z",
+        ...overrides,
+      },
+      null,
+      2,
+    )}\n`,
+  );
 }
 
 const sourceFixturePaths = {
@@ -189,12 +263,22 @@ async function readRequestBody(request: IncomingMessage) {
 async function withUploadServer<T>(
   handler: (payload: unknown) => void | Promise<void>,
   callback: (webhookUrl: string) => Promise<T>,
+  accountId = TEST_ACCOUNT_ID,
 ) {
   const server = createServer(async (request, response) => {
+    if (respondToIdentityRequest(request, response, accountId)) return;
     const body = await readRequestBody(request);
-    await handler(JSON.parse(body));
+    const payload = JSON.parse(body) as { entries?: unknown[] };
+    await handler(payload);
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ status: 0, uploaded: 1 }));
+    response.end(
+      JSON.stringify({
+        status: 0,
+        uploaded: payload.entries?.length ?? 0,
+        committed: true,
+        revision: 1,
+      }),
+    );
   });
 
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -217,12 +301,22 @@ async function withUploadServer<T>(
 async function withProxyUploadServer<T>(
   handler: (payload: unknown, requestUrl: string | undefined) => void | Promise<void>,
   callback: (proxyUrl: string) => Promise<T>,
+  accountId = TEST_ACCOUNT_ID,
 ) {
   const server = createServer(async (request, response) => {
+    if (respondToIdentityRequest(request, response, accountId)) return;
     const body = await readRequestBody(request);
-    await handler(JSON.parse(body), request.url);
+    const payload = JSON.parse(body) as { entries?: unknown[] };
+    await handler(payload, request.url);
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ status: 0, uploaded: 1 }));
+    response.end(
+      JSON.stringify({
+        status: 0,
+        uploaded: payload.entries?.length ?? 0,
+        committed: true,
+        revision: 1,
+      }),
+    );
   });
 
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -253,13 +347,23 @@ async function withHttpsUploadProxy<T>(
   home: string,
   handler: (payload: unknown) => void | Promise<void>,
   callback: (proxyUrl: string, getTunnelTarget: () => string | undefined) => Promise<T>,
+  accountId = TEST_ACCOUNT_ID,
 ) {
   const cert = await createSelfSignedCertificate();
   const uploadServer = createHttpsServer(cert, async (request, response) => {
+    if (respondToIdentityRequest(request, response, accountId)) return;
     const body = await readRequestBody(request);
-    await handler(JSON.parse(body));
+    const payload = JSON.parse(body) as { entries?: unknown[] };
+    await handler(payload);
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ status: 0, uploaded: 1 }));
+    response.end(
+      JSON.stringify({
+        status: 0,
+        uploaded: payload.entries?.length ?? 0,
+        committed: true,
+        revision: 1,
+      }),
+    );
   });
 
   await new Promise<void>((resolve) => uploadServer.listen(0, "127.0.0.1", resolve));
@@ -344,16 +448,31 @@ async function writeSqliteUsage(home: string, relativePath: string) {
 
 async function withSequencedUploadServer<T>(
   statuses: number[],
-  callback: (webhookUrl: string, requestCount: () => number) => Promise<T>,
+  callback: (
+    webhookUrl: string,
+    requestCount: () => number,
+    payloads: unknown[],
+    identityRequestCount: () => number,
+  ) => Promise<T>,
+  accountId = TEST_ACCOUNT_ID,
 ) {
   let requests = 0;
+  let identityRequests = 0;
+  const payloads: unknown[] = [];
   const server = createServer(async (request, response) => {
-    await readRequestBody(request);
+    if (request.method === "GET") identityRequests += 1;
+    if (respondToIdentityRequest(request, response, accountId)) return;
+    const payload = JSON.parse(await readRequestBody(request)) as { entries?: unknown[] };
+    payloads.push(payload);
     const status = statuses[Math.min(requests, statuses.length - 1)] ?? 200;
     requests += 1;
     response.writeHead(status, { "content-type": "application/json" });
     response.end(
-      JSON.stringify(status >= 200 && status < 300 ? { status: 0, uploaded: 1 } : { status: 1, error: "temporary" }),
+      JSON.stringify(
+        status >= 200 && status < 300
+          ? { status: 0, uploaded: payload.entries?.length ?? 0, committed: true, revision: requests }
+          : { status: 1, error: "temporary" },
+      ),
     );
   });
 
@@ -365,6 +484,74 @@ async function withSequencedUploadServer<T>(
     return await callback(
       `http://127.0.0.1:${address.port}/api/collector/upload/test-token`,
       () => requests,
+      payloads,
+      () => identityRequests,
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+}
+
+type ScriptedUploadResponse = {
+  status?: number;
+  headers?: Record<string, string>;
+  body?: Record<string, unknown>;
+  destroySocket?: boolean;
+};
+
+async function withScriptedUploadServer<T>(
+  script: ScriptedUploadResponse[],
+  callback: (
+    webhookUrl: string,
+    requestCount: () => number,
+    payloads: unknown[],
+    identityRequestCount: () => number,
+  ) => Promise<T>,
+  accountId = TEST_ACCOUNT_ID,
+) {
+  let requests = 0;
+  let identityRequests = 0;
+  const payloads: unknown[] = [];
+  const server = createServer(async (request, response) => {
+    if (request.method === "GET") identityRequests += 1;
+    if (respondToIdentityRequest(request, response, accountId)) return;
+    const payload = JSON.parse(await readRequestBody(request)) as { entries?: unknown[] };
+    payloads.push(payload);
+    const step = script[Math.min(requests, script.length - 1)] ?? {};
+    requests += 1;
+
+    if (step.destroySocket) {
+      request.socket.destroy();
+      return;
+    }
+
+    const status = step.status ?? 200;
+    response.writeHead(status, {
+      "content-type": "application/json",
+      ...step.headers,
+    });
+    response.end(
+      JSON.stringify(
+        step.body ??
+          (status >= 200 && status < 300
+            ? { status: 0, uploaded: payload.entries?.length ?? 0, committed: true, revision: requests }
+            : { status: 1, error: "temporary" }),
+      ),
+    );
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server did not bind");
+    return await callback(
+      `http://127.0.0.1:${address.port}/api/collector/upload/test-token`,
+      () => requests,
+      payloads,
+      () => identityRequests,
     );
   } finally {
     await new Promise<void>((resolve, reject) =>
@@ -456,7 +643,7 @@ describe("tokenrank collector CLI", () => {
     expect(stdout).not.toContain("Commands:");
   });
 
-  it("lets --lang override the environment and renders the complete Chinese scoreboard", async () => {
+  it("lets --lang override the environment and renders the complete Chinese brand card", async () => {
     const home = await tempHome();
     const { stdout } = await runCli(["tools", "--lang", "zh"], home, {
       TOKENRANK_LANG: "en",
@@ -465,12 +652,12 @@ describe("tokenrank collector CLI", () => {
       COLUMNS: "120",
     });
 
-    expect(stdout).toContain("公开排名信号");
-    expect(stdout).toContain("TOKEN 燃烧。");
-    expect(stdout).toContain("RANKING 狂飙。");
+    expect(stdout).toContain("本地 AI Token 用量采集器");
+    expect(stdout).toContain("仅聚合数据");
+    expect(stdout).toContain("内容留在本机");
     expect(stdout).toContain("支持的工具");
-    expect(stdout).not.toContain("PUBLIC RANK SIGNAL");
-    expect(stripAnsi(stdout).split("\n").every((line) => terminalDisplayWidth(line) <= 50)).toBe(true);
+    expect(stdout).not.toContain("Local AI usage collector");
+    expect(stripAnsi(stdout).split("\n").every((line) => terminalDisplayWidth(line) <= 78)).toBe(true);
   });
 
   it("rejects unsupported explicit languages", async () => {
@@ -534,7 +721,7 @@ describe("tokenrank collector CLI", () => {
     expect(stdout).not.toContain("next: tokenrank upload");
   });
 
-  it("renders the selected B Scoreboard Panels composition in a wide TTY", async () => {
+  it("renders the Gum-inspired TokenRank cards in a wide TTY", async () => {
     const home = await tempHome();
     const { stdout } = await runCli(["tools"], home, {
       TOKENRANK_TEST_TTY: "1",
@@ -544,20 +731,21 @@ describe("tokenrank collector CLI", () => {
 
     const visibleLines = stripAnsi(stdout).split("\n");
 
-    expect(visibleLines[0]).toMatch(/^TOKEN\/RANK \/\/ LIVE\s+01$/);
-    expect(stdout).toContain("TOKEN/RANK // LIVE");
-    expect(stdout).toContain("PUBLIC RANK SIGNAL");
-    expect(stdout).toContain("BURN TOKENS.");
-    expect(stdout).toContain("ASCEND RANKS.");
-    expect(stdout).toContain("SUPPORTED TOOLS");
-    expect(stdout).toContain("\u001b[48;2;214;255;63m");
+    expect(visibleLines[0]).toMatch(/^╭─ TOKENRANK ─+╮$/);
+    expect(stdout).toContain("Local AI usage collector");
+    expect(stdout).toContain("AGGREGATES ONLY");
+    expect(stdout).toContain("CONTENT STAYS LOCAL");
+    expect(stdout).toContain("SUPPORTED TOOLS · 18");
+    expect(stdout).toContain("\u001b[38;2;214;255;63m");
     expect(stdout).toContain("\u001b[38;2;255;91;53m");
-    expect(stdout).not.toContain("TOKEN/RANK // COLLECTOR");
-    expect(stdout).not.toContain("STATUS / 001");
+    expect(stdout).not.toContain("\u001b[48;2;214;255;63m");
+    expect(stdout).not.toContain("BURN TOKENS.");
+    expect(stdout).not.toContain("ASCEND RANKS.");
     expect(stdout).not.toContain("\u001b[38;5;");
     expect(stdout).not.toMatch(/48;2;(36;255;184|0;218;255|105;48;255|255;37;141)m/);
     expect(stdout).not.toContain("████████╗");
     expect(stdout).toContain("github-copilot");
+    expect(visibleLines.every((line) => terminalDisplayWidth(line) <= 78)).toBe(true);
   });
 
   it("uses a compact layout without overflowing a narrow terminal", async () => {
@@ -571,10 +759,39 @@ describe("tokenrank collector CLI", () => {
       });
       const visibleLines = stripAnsi(stdout).split("\n");
 
-      expect(visibleLines.every((line) => [...line].length <= columns)).toBe(true);
-      expect(stdout).toContain("TOKEN/RANK // LIVE");
-      expect(stdout).not.toContain("BURN TOKENS.");
+      expect(visibleLines.every((line) => terminalDisplayWidth(line) <= columns)).toBe(true);
+      expect(stdout).toContain("TOKENRANK");
+      expect(stdout).toContain("AGGREGATES ONLY");
+      expect(stdout).toContain("CONTENT STAYS LOCAL");
     }
+  });
+
+  it("renders aligned branded help without overflowing the terminal", async () => {
+    const home = await tempHome();
+    const { stdout } = await runCli(["--help"], home, {
+      TOKENRANK_TEST_TTY: "1",
+      TOKENRANK_NO_ANIMATION: "1",
+      COLUMNS: "78",
+    });
+    const visibleLines = stripAnsi(stdout).split("\n");
+
+    expect(stdout).toContain("TOKENRANK");
+    expect(stdout).toContain("USAGE");
+    expect(stdout).toContain("tokenrank <command> [options]");
+    expect(stdout).toContain("Preview aggregate usage before upload");
+    expect(stdout).toContain("GLOBAL OPTIONS");
+    expect(visibleLines.every((line) => terminalDisplayWidth(line) <= 78)).toBe(true);
+
+    const { stdout: narrowStdout } = await runCli(["--help"], home, {
+      TOKENRANK_TEST_TTY: "1",
+      TOKENRANK_NO_ANIMATION: "1",
+      COLUMNS: "40",
+    });
+    expect(
+      stripAnsi(narrowStdout)
+        .split("\n")
+        .every((line) => terminalDisplayWidth(line) <= 40),
+    ).toBe(true);
   });
 
   it("keeps NO_COLOR output free of ANSI control sequences", async () => {
@@ -597,16 +814,103 @@ describe("tokenrank collector CLI", () => {
       TOKENRANK_TEST_PLATFORM: "darwin",
       TOKENRANK_NOW: "2026-07-12T05:00:00.000Z",
       TOKENRANK_NO_LOGO: "1",
+      TOKENRANK_TEST_TTY: "1",
+      TOKENRANK_NO_ANIMATION: "1",
+      COLUMNS: "78",
     };
-    await runCli(["connect", "https://tokenrank.test/api/collector/upload/secret"], home, env);
+    const webhookUrl = "https://tokenrank.test/api/collector/upload/secret";
+    await runCli(["connect", webhookUrl], home, env);
     await runCli(["service", "install"], home, env);
+    await seedSuccessfulFullState(home, webhookUrl);
+    await writeFile(
+      path.join(home, ".tokenrank", "service-state.json"),
+      JSON.stringify({
+        lastAttemptAt: "2026-07-12T05:00:00.000Z",
+        lastSuccessfulAt: "2026-07-12T05:00:00.000Z",
+        lastSuccessfulAccountId: TEST_ACCOUNT_ID,
+        lastSuccessfulEndpointId: testEndpointId(webhookUrl),
+        lastErrorCode: null,
+      }),
+    );
 
     const { stdout } = await runCli(["status"], home, env);
 
+    expect(stdout).toContain("HEALTHY");
     expect(stdout).toContain("CONNECTED");
     expect(stdout).toContain("SERVICE INSTALLED");
     expect(stdout).toContain("NEXT BOUNDARY");
+    expect(stripAnsi(stdout)).toContain("╭─ GRID STATUS");
     expect(stdout).not.toContain("/secret");
+  });
+
+  it("reports stable CONFIGURED, VERIFIED, and HEALTHY JSON states with health exit codes", async () => {
+    const home = await tempHome();
+    const webhookUrl = "https://tokenrank.test/api/collector/upload/secret";
+    await runCli(["connect", webhookUrl], home);
+
+    const configured = await runCliFailure(["status", "--json"], home);
+    expect(configured.code).toBe(1);
+    expect(JSON.parse(configured.stdout)).toEqual(
+      expect.objectContaining({
+        status: "CONFIGURED",
+        configured: true,
+        verified: false,
+        healthy: false,
+        lastSuccessfulAt: null,
+        lastErrorCode: null,
+      }),
+    );
+    expect(configured.stdout).not.toContain("TOKEN/RANK");
+    expect(configured.stdout).not.toContain("/secret");
+
+    await seedSuccessfulFullState(home, webhookUrl);
+
+    await writeFile(
+      path.join(home, ".tokenrank", "service-state.json"),
+      JSON.stringify({
+        lastAttemptAt: "2026-07-12T06:00:00.000Z",
+        lastSuccessfulAt: "2026-07-12T05:00:00.000Z",
+        lastSuccessfulAccountId: TEST_ACCOUNT_ID,
+        lastSuccessfulEndpointId: testEndpointId(webhookUrl),
+        lastErrorCode: "UPLOAD_FAILED",
+      }),
+    );
+    const verified = await runCliFailure(["status", "--json"], home);
+    expect(verified.code).toBe(1);
+    expect(JSON.parse(verified.stdout)).toEqual(
+      expect.objectContaining({
+        status: "VERIFIED",
+        configured: true,
+        verified: true,
+        healthy: false,
+        lastSuccessfulAt: "2026-07-12T05:00:00.000Z",
+        lastErrorCode: "UPLOAD_FAILED",
+      }),
+    );
+
+    await writeFile(
+      path.join(home, ".tokenrank", "service-state.json"),
+      JSON.stringify({
+        lastAttemptAt: "2026-07-12T07:00:00.000Z",
+        lastSuccessfulAt: "2026-07-12T07:00:00.000Z",
+        lastSuccessfulAccountId: TEST_ACCOUNT_ID,
+        lastSuccessfulEndpointId: testEndpointId(webhookUrl),
+        lastErrorCode: null,
+      }),
+    );
+    const healthy = await runCli(["status", "--json"], home);
+    expect(JSON.parse(healthy.stdout)).toEqual(
+      expect.objectContaining({
+        status: "HEALTHY",
+        configured: true,
+        verified: true,
+        healthy: true,
+        lastAttemptAt: "2026-07-12T07:00:00.000Z",
+        lastSuccessfulAt: "2026-07-12T07:00:00.000Z",
+        lastErrorCode: null,
+        nextScheduledAt: expect.any(String),
+      }),
+    );
   });
 
   it("diagnoses exact tool sources without exposing local paths", async () => {
@@ -618,13 +922,25 @@ describe("tokenrank collector CLI", () => {
       usage: { input_tokens: 9, output_tokens: 3 },
     });
 
-    const { stdout } = await runCli(["doctor"], home, { TOKENRANK_NO_LOGO: "1" });
+    const { stdout, stderr } = await runCli(["doctor"], home, {
+      TOKENRANK_NO_LOGO: "1",
+      TOKENRANK_TEST_TTY: "1",
+      TOKENRANK_NO_ANIMATION: "1",
+      COLUMNS: "78",
+    });
 
-    expect(stdout).toContain("codex\tREADY");
-    expect(stdout).toContain("cursor\tEXACT SOURCE REQUIRED");
+    expect(stripAnsi(stdout)).toContain("╭─ SOURCE DIAGNOSTICS");
+    expect(stdout).toContain("codex");
+    expect(stdout).toContain("READY");
+    expect(stdout).toContain("cursor");
+    expect(stdout).toContain("EXACT SOURCE REQUIRED");
     expect(stdout).toContain("github-copilot");
     expect(stdout).toContain("continue");
     expect(stdout).not.toContain(home);
+    expect(stripAnsi(stderr)).toContain("Diagnosis complete");
+    expect(stripAnsi(stderr)).toContain("18 sources");
+    expect(stripAnsi(stderr)).toContain("1 files");
+    expect(stripAnsi(stderr)).toContain("1 rows");
   });
 
   it("removes the saved webhook config on logout", async () => {
@@ -647,6 +963,89 @@ describe("tokenrank collector CLI", () => {
     for (const tool of TOOL_KEYS) {
       expect(stdout).toContain(tool);
     }
+
+    const { stdout: styledStdout } = await runCli(["sources"], home, {
+      TOKENRANK_TEST_TTY: "1",
+      TOKENRANK_NO_ANIMATION: "1",
+      COLUMNS: "40",
+    });
+    const styledPlain = stripAnsi(styledStdout);
+
+    expect(styledPlain).toContain("LOCAL SOURCE ADAPTERS");
+    expect(styledPlain).toContain("› ~");
+    expect(styledPlain.split("\n").every((line) => terminalDisplayWidth(line) <= 40)).toBe(true);
+  });
+
+  it("renders preview rows as a branded token table in a TTY", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, sourceFixturePaths.codex, {
+      id: "preview-card-event",
+      timestamp: "2026-07-12T05:00:00.000Z",
+      model: "gpt-5-codex",
+      usage: { input_tokens: 9, output_tokens: 3 },
+    });
+
+    const { stdout, stderr } = await runCli(["preview", "--tool", "codex"], home, {
+      TOKENRANK_TEST_TTY: "1",
+      TOKENRANK_NO_ANIMATION: "1",
+      COLUMNS: "78",
+    });
+    const plain = stripAnsi(stdout);
+
+    expect(plain).toContain("TOKENRANK");
+    expect(plain).toContain("SCAN LOCAL USAGE · 1 ROW");
+    expect(plain).toContain("2026-07-12");
+    expect(plain).toContain("codex");
+    expect(plain).toContain("gpt-5-codex");
+    expect(plain).toContain("12");
+    expect(plain.split("\n").every((line) => terminalDisplayWidth(line) <= 78)).toBe(true);
+    expect(stripAnsi(stderr)).toContain("Scan complete");
+    expect(stripAnsi(stderr)).toContain("1 sources");
+    expect(stripAnsi(stderr)).toContain("1 files");
+    expect(stripAnsi(stderr)).toContain("1 rows");
+  });
+
+  it("keeps TTY preview JSON parseable while progress stays on stderr", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, sourceFixturePaths.codex, {
+      id: "preview-json-progress-event",
+      timestamp: "2026-07-12T05:00:00.000Z",
+      model: "gpt-5-codex",
+      usage: { input_tokens: 9, output_tokens: 3 },
+    });
+
+    const { stdout, stderr } = await runCli(["preview", "--json", "--tool", "codex"], home, {
+      TOKENRANK_TEST_TTY: "1",
+      TOKENRANK_NO_ANIMATION: "1",
+      NO_COLOR: "1",
+      COLUMNS: "78",
+    });
+
+    expect(JSON.parse(stdout)).toMatchObject({
+      entries: [expect.objectContaining({ tool: "codex", total: 12 })],
+    });
+    expect(stderr).toContain("Scan complete");
+    expect(stderr).not.toContain("\u001b[");
+  });
+
+  it("can disable interactive progress without changing preview output", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, sourceFixturePaths.codex, {
+      id: "preview-no-progress-event",
+      timestamp: "2026-07-12T05:00:00.000Z",
+      model: "gpt-5-codex",
+      usage: { input_tokens: 4, output_tokens: 2 },
+    });
+
+    const { stdout, stderr } = await runCli(["preview", "--json", "--tool", "codex"], home, {
+      TOKENRANK_TEST_TTY: "1",
+      TOKENRANK_NO_PROGRESS: "1",
+    });
+
+    expect(JSON.parse(stdout)).toMatchObject({
+      entries: [expect.objectContaining({ tool: "codex", total: 6 })],
+    });
+    expect(stderr).toBe("");
   });
 
   it("keeps Codex usage attributed to Codex when Cursor is the editor host", async () => {
@@ -667,6 +1066,75 @@ describe("tokenrank collector CLI", () => {
 
     expect(cursor.entries).toEqual([]);
     expect(codex.entries).toEqual([expect.objectContaining({ tool: "codex", total: 18 })]);
+  });
+
+  it("assigns timezone-bearing events to their UTC calendar day", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, sourceFixturePaths.codex, {
+      id: "utc-boundary-event",
+      date: "2026-07-12",
+      timestamp: "2026-07-12T00:30:00+08:00",
+      model: "gpt-5-codex",
+      usage: { input_tokens: 11, output_tokens: 7 },
+    });
+
+    const payload = JSON.parse(
+      (await runCli(["preview", "--json", "--tool", "codex"], home)).stdout,
+    ) as { entries: Array<{ date: string; total: number }> };
+
+    expect(payload.entries).toEqual([
+      expect.objectContaining({ date: "2026-07-11", total: 18 }),
+    ]);
+  });
+
+  it("assigns Unix second and millisecond epochs to UTC dates", async () => {
+    const home = await tempHome();
+    await writeJsonLines(home, sourceFixturePaths.codex, [
+      {
+        id: "epoch-seconds",
+        timestamp: 1_783_787_400,
+        model: "epoch-seconds-model",
+        usage: { input_tokens: 2, output_tokens: 1 },
+      },
+      {
+        id: "epoch-millis",
+        timestamp: 1_783_787_400_000,
+        model: "epoch-millis-model",
+        usage: { input_tokens: 3, output_tokens: 1 },
+      },
+    ]);
+
+    const payload = JSON.parse(
+      (await runCli(["preview", "--json", "--tool", "codex"], home)).stdout,
+    ) as { entries: Array<{ date: string; model: string }> };
+    expect(payload.entries).toEqual([
+      expect.objectContaining({ date: "2026-07-11", model: "epoch-millis-model" }),
+      expect.objectContaining({ date: "2026-07-11", model: "epoch-seconds-model" }),
+    ]);
+  });
+
+  it("includes observable Codex parent and subagent model calls exactly once in the total", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, ".codex/sessions/parent.jsonl", {
+      id: "parent-call",
+      timestamp: "2026-07-12T05:00:00.000Z",
+      model: "gpt-5-codex",
+      usage: { input_tokens: 10, output_tokens: 5 },
+      total_token_usage: { input_tokens: 9999, output_tokens: 9999 },
+    });
+    await writeJsonLog(home, ".codex/sessions/subagents/child.jsonl", {
+      id: "child-call",
+      parent_thread_id: "parent-thread",
+      timestamp: "2026-07-12T05:01:00.000Z",
+      model: "gpt-5-codex",
+      usage: { input_tokens: 7, output_tokens: 3 },
+    });
+
+    const payload = JSON.parse(
+      (await runCli(["preview", "--json", "--tool", "codex"], home)).stdout,
+    ) as { entries: Array<{ total: number }> };
+
+    expect(payload.entries).toEqual([expect.objectContaining({ total: 25 })]);
   });
 
   it("finds VS Code extension tools under Windows APPDATA", async () => {
@@ -857,6 +1325,39 @@ describe("tokenrank collector CLI", () => {
     ]);
   });
 
+  it("uploads long model names in distinct schema-safe stable buckets", async () => {
+    const home = await tempHome();
+    const sharedPrefix = `provider/${"x".repeat(140)}`;
+    await writeJsonLines(home, sourceFixturePaths.codex, [
+      {
+        id: "long-model-a",
+        timestamp: "2026-07-12T04:30:00.000Z",
+        model: `${sharedPrefix}-a`,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+      {
+        id: "long-model-b",
+        timestamp: "2026-07-12T04:31:00.000Z",
+        model: `${sharedPrefix}-b`,
+        usage: { input_tokens: 2, output_tokens: 1 },
+      },
+    ]);
+
+    await withSequencedUploadServer([200], async (webhookUrl, requestCount, payloads) => {
+      await runCli(["connect", webhookUrl], home);
+      await runCli(["upload"], home, { TOKENRANK_NOW: "2026-07-12T05:00:00.000Z" });
+
+      expect(requestCount()).toBe(1);
+      const entries = (payloads[0] as { entries: Array<{ model: string }> }).entries;
+      const models = entries.map((entry) => entry.model);
+      expect(models).toHaveLength(2);
+      expect(new Set(models).size).toBe(2);
+      expect(models.every((model) => model.length <= 120)).toBe(true);
+      expect(models.every((model) => model.startsWith("provider/"))).toBe(true);
+      expect(models.every((model) => /~[0-9a-f]{16}$/.test(model))).toBe(true);
+    });
+  });
+
   it("carries Codex JSONL model context into later usage rows", async () => {
     const home = await tempHome();
     await writeJsonLines(home, ".codex/sessions/codex.jsonl", [
@@ -918,7 +1419,7 @@ describe("tokenrank collector CLI", () => {
         expect.objectContaining({ model: "gpt-5.2-codex", total: 15 }),
       ]);
     },
-    30_000,
+    60_000,
   );
 
   it("skips oversized or malformed JSONL records and continues across CRLF chunks", async () => {
@@ -1120,6 +1621,8 @@ describe("tokenrank collector CLI", () => {
     await withUploadServer(
       (payload) => {
         expect(payload).toMatchObject({
+          accountingVersion: 2,
+          syncMode: "incremental",
           clientVersion: expect.any(String),
           deviceId: expect.stringMatching(/^tokenrank-/),
           timezone: expect.any(String),
@@ -1137,6 +1640,7 @@ describe("tokenrank collector CLI", () => {
       },
       async (webhookUrl) => {
         await runCli(["connect", webhookUrl], home);
+        await seedSuccessfulFullState(home, webhookUrl);
         const { stdout } = await runCli(["upload", "--file", usagePath], home);
 
         expect(stdout).toContain(`${TOOL_KEYS.length} rows`);
@@ -1170,6 +1674,7 @@ describe("tokenrank collector CLI", () => {
       },
       async (webhookUrl) => {
         await runCli(["connect", webhookUrl], home);
+        await seedSuccessfulFullState(home, webhookUrl);
         const { stdout } = await runCli(["upload", "--file", usagePath], home);
 
         expect(stdout).toContain("501 rows");
@@ -1209,7 +1714,9 @@ describe("tokenrank collector CLI", () => {
         ]);
       },
       async (proxyUrl) => {
-        await runCli(["connect", "http://tokenrank.invalid/api/collector/upload/test-token"], home);
+        const webhookUrl = "http://tokenrank.invalid/api/collector/upload/test-token";
+        await runCli(["connect", webhookUrl], home);
+        await seedSuccessfulFullState(home, webhookUrl);
         const { stdout } = await runCli(["upload", "--file", usagePath], home, {
           TOKENRANK_PROXY: proxyUrl,
         });
@@ -1249,7 +1756,9 @@ describe("tokenrank collector CLI", () => {
         ]);
       },
       async (proxyUrl, getTunnelTarget) => {
-        await runCli(["connect", "https://tokenrank.invalid/api/collector/upload/test-token"], home);
+        const webhookUrl = "https://tokenrank.invalid/api/collector/upload/test-token";
+        await runCli(["connect", webhookUrl], home);
+        await seedSuccessfulFullState(home, webhookUrl);
         const { stdout } = await runCli(["upload", "--file", usagePath], home, {
           NODE_TLS_REJECT_UNAUTHORIZED: "0",
           TOKENRANK_PROXY: proxyUrl,
@@ -1307,7 +1816,9 @@ describe("tokenrank collector CLI", () => {
       },
       async (webhookUrl) => {
         await runCli(["connect", webhookUrl], home);
-        const { stdout } = await runCli(["upload"], home);
+        const { stdout } = await runCli(["upload"], home, {
+          TOKENRANK_NOW: "2026-06-23T12:00:00.000Z",
+        });
 
         expect(stdout).toContain("0 rows");
       },
@@ -1333,7 +1844,9 @@ describe("tokenrank collector CLI", () => {
       },
       async (webhookUrl) => {
         await runCli(["connect", webhookUrl], home);
-        const { stdout } = await runCli(["upload"], home);
+        const { stdout } = await runCli(["upload"], home, {
+          TOKENRANK_NOW: "2026-06-23T12:00:00.000Z",
+        });
 
         expect(stdout).toMatch(/1 row(?:\r?\n|$)/);
         expect(stdout).toContain("SCAN LOCAL USAGE");
@@ -1343,7 +1856,7 @@ describe("tokenrank collector CLI", () => {
     );
   });
 
-  it("renders a real upload as compact Scoreboard Panels without a scan log wall", async () => {
+  it("renders a real upload as compact branded cards without a scan log wall", async () => {
     const home = await tempHome();
     await writeJsonLog(home, sourceFixturePaths.codex, {
       id: "visual-upload-event",
@@ -1356,7 +1869,8 @@ describe("tokenrank collector CLI", () => {
       () => undefined,
       async (webhookUrl) => {
         await runCli(["connect", webhookUrl], home, { TOKENRANK_NO_LOGO: "1" });
-        const { stdout } = await runCli(["upload"], home, {
+        const { stdout, stderr } = await runCli(["upload"], home, {
+          TOKENRANK_NOW: "2026-07-12T06:00:00.000Z",
           TOKENRANK_TEST_TTY: "1",
           TOKENRANK_NO_ANIMATION: "1",
           COLUMNS: "96",
@@ -1364,28 +1878,29 @@ describe("tokenrank collector CLI", () => {
 
         const plain = stripAnsi(stdout);
 
-        expect(stdout).toContain("TOKEN/RANK // LIVE");
-        expect(stdout).toContain("PUBLIC RANK SIGNAL");
+        expect(stdout).toContain("TOKENRANK");
+        expect(stdout).toContain("AGGREGATES ONLY");
         expect(stdout).toContain("UPLOAD ENDPOINT");
         expect(stdout).toContain("CONNECTED");
         expect(stdout).toContain("LOCAL SOURCES");
         expect(stdout).toContain("Codex");
-        expect(stdout).toContain(
-          "\u001b[38;2;214;255;63m██████████\u001b[0m\u001b[38;2;133;139;128m░░░░",
-        );
-        expect(stdout).toContain("DONE");
+        expect(stdout).toContain("1 files · 1 row");
+        expect(stdout).toContain("1 ACTIVE · 17 SKIPPED");
         expect(stdout).toContain("SKIPPED");
-        expect(stdout).toContain("RANK SIGNAL");
         expect(stdout).toContain("PRIVATE CONTENT NEVER LEAVES THIS MACHINE");
         expect(stdout).toContain("UPLOAD COMPLETE");
         expect(plain).not.toContain("Scanning Codex");
         expect(plain).not.toContain("scope: all tools");
         expect(plain).not.toContain("Build payload");
         expect(plain).not.toContain("batch 1/1");
-        expect(plain.split("\n").every((line) => [...line].length <= 50)).toBe(true);
+        expect(plain.split("\n").every((line) => terminalDisplayWidth(line) <= 78)).toBe(true);
         expect(stdout).not.toContain("BOOTING TOKEN GRID");
         expect(stdout).not.toContain("GRID SYNCHRONIZED");
         expect(stdout).not.toMatch(/48;2;(105;48;255|255;37;141)m/);
+        expect(stripAnsi(stderr)).toContain("Scan complete");
+        expect(stripAnsi(stderr)).toContain("Upload complete");
+        expect(stripAnsi(stderr)).toContain("1 row");
+        expect(stripAnsi(stderr)).toContain("1 batches");
       },
     );
   });
@@ -1407,6 +1922,866 @@ describe("tokenrank collector CLI", () => {
     ]);
   });
 
+  it("scans stale-mtime files before filtering by UTC event date and keeps high-water rows", async () => {
+    const home = await tempHome();
+    const relativeFile = sourceFixturePaths.codex;
+    const steadyFile = ".codex/sessions/steady-contribution.json";
+    await writeJsonLog(home, relativeFile, {
+      id: "high-water-event",
+      timestamp: "2026-07-12T04:30:00.000Z",
+      model: "gpt-5-codex",
+      usage: { input_tokens: 8, output_tokens: 4 },
+    });
+    await writeJsonLog(home, steadyFile, {
+      id: "steady-event",
+      timestamp: "2026-07-12T04:45:00.000Z",
+      model: "gpt-5-codex",
+      usage: { input_tokens: 8, output_tokens: 4 },
+    });
+    const staleMtime = new Date("2026-07-01T00:00:00.000Z");
+    await utimes(path.join(home, steadyFile), staleMtime, staleMtime);
+
+    await withSequencedUploadServer([200], async (
+      webhookUrl,
+      requestCount,
+      payloads,
+      identityRequestCount,
+    ) => {
+      await runCli(["connect", webhookUrl], home);
+      const firstClock = { TOKENRANK_NOW: "2026-07-12T05:00:00.000Z" };
+      await runCli(["upload"], home, firstClock);
+
+      const first = payloads[0] as {
+        accountingVersion: number;
+        syncMode: string;
+        snapshotId: string;
+        batchIndex: number;
+        batchCount: number;
+        batchHash: string;
+        entries: unknown[];
+      };
+      expect(first).toMatchObject({
+        accountingVersion: 2,
+        syncMode: "full",
+        snapshotId: expect.stringMatching(/^[a-f0-9-]{36}$/),
+        cutoverDate: "2026-07-12",
+        batchIndex: 0,
+        batchCount: 1,
+        batchHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        entries: [expect.objectContaining({ total: 24 })],
+      });
+      expect(first.batchHash).toBe(
+        createHash("sha256").update(JSON.stringify(first.entries)).digest("hex"),
+      );
+
+      await runCli(["upload"], home, { TOKENRANK_NOW: "2026-07-12T06:00:00.000Z" });
+      expect(requestCount()).toBe(1);
+      expect(identityRequestCount()).toBe(1);
+
+      await writeJsonLog(home, relativeFile, {
+        id: "high-water-event",
+        timestamp: "2026-07-12T04:30:00.000Z",
+        model: "gpt-5-codex",
+        usage: { input_tokens: 10, output_tokens: 5 },
+      });
+      await runCli(["upload"], home, { TOKENRANK_NOW: "2026-07-12T07:00:00.000Z" });
+      expect(payloads[1]).toMatchObject({
+        accountingVersion: 2,
+        syncMode: "incremental",
+        entries: [expect.objectContaining({ total: 27 })],
+      });
+
+      await writeJsonLog(home, relativeFile, {
+        id: "high-water-event",
+        timestamp: "2026-07-12T04:30:00.000Z",
+        model: "gpt-5-codex",
+        usage: { input_tokens: 3, output_tokens: 2 },
+      });
+      await runCli(["upload"], home, { TOKENRANK_NOW: "2026-07-12T07:30:00.000Z" });
+      expect(requestCount()).toBe(2);
+
+      await writeJsonLines(home, relativeFile, []);
+      await runCli(["upload"], home, { TOKENRANK_NOW: "2026-07-12T08:00:00.000Z" });
+      expect(requestCount()).toBe(2);
+
+      await runCli(["upload"], home, { TOKENRANK_NOW: "2026-07-13T00:01:00.000Z" });
+      expect(payloads[2]).toMatchObject({
+        syncMode: "full",
+        cutoverDate: "2026-07-12",
+        batchIndex: 0,
+        batchCount: 1,
+        entries: [expect.objectContaining({ total: 27 })],
+      });
+      expect(requestCount()).toBe(3);
+    });
+  });
+
+  it("preserves device cutover and high-water aggregates when the webhook token rotates", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, sourceFixturePaths.codex, {
+      id: "rotation-event",
+      timestamp: "2026-07-12T04:30:00.000Z",
+      model: "gpt-5-codex",
+      usage: { input_tokens: 8, output_tokens: 4 },
+    });
+
+    await withUploadServer(
+      (payload) => {
+        expect(payload).toMatchObject({
+          syncMode: "full",
+          cutoverDate: "2026-07-12",
+          entries: [expect.objectContaining({ total: 12 })],
+        });
+      },
+      async (firstWebhookUrl) => {
+        await runCli(["connect", firstWebhookUrl], home);
+        await runCli(["upload"], home, { TOKENRANK_NOW: "2026-07-12T05:00:00.000Z" });
+
+        await withUploadServer(
+          (payload) => {
+            expect(payload).toMatchObject({
+              syncMode: "full",
+              cutoverDate: "2026-07-12",
+              entries: [expect.objectContaining({ total: 12 })],
+            });
+          },
+          async (rotatedWebhookUrl) => {
+            await runCli(["connect", rotatedWebhookUrl], home);
+            await runCli(["upload"], home, {
+              TOKENRANK_NOW: "2026-07-13T05:00:00.000Z",
+            });
+
+            const state = JSON.parse(
+              await readFile(path.join(home, ".tokenrank", "aggregate-state.json"), "utf8"),
+            ) as {
+              endpointId: string;
+              cutoverDate: string;
+              aggregates: Record<string, { total: number }>;
+            };
+            expect(state.endpointId).toBe(testEndpointId(rotatedWebhookUrl));
+            expect(state.cutoverDate).toBe("2026-07-12");
+            expect(Object.values(state.aggregates)).toEqual([
+              expect.objectContaining({ total: 12 }),
+            ]);
+          },
+        );
+      },
+    );
+  });
+
+  it("finishes an active full snapshot immediately after a same-account token rotation", async () => {
+    const home = await tempHome();
+    const sourcePath = ".codex/sessions/rotation-active.json";
+    const originalEvents = Array.from({ length: 501 }, (_, index) => ({
+      id: `rotation-active-${index}`,
+      timestamp: "2026-07-12T05:00:00.000Z",
+      model: `rotation-active-${String(index).padStart(3, "0")}`,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }));
+    const addedEvent = {
+      id: "rotation-active-added",
+      timestamp: "2026-07-12T05:30:00.000Z",
+      model: "rotation-active-added",
+      usage: { input_tokens: 3, output_tokens: 2 },
+    };
+    await writeJsonLog(home, sourcePath, originalEvents);
+
+    const activeConflict: ScriptedUploadResponse = {
+      status: 409,
+      body: {
+        status: -1,
+        error: "ACTIVE_SNAPSHOT_CONFLICT",
+        activeSnapshotId: "00000000-0000-4000-8000-000000000000",
+        expectedCutoverDate: "2026-07-12",
+        revision: 1,
+      },
+    };
+    await withScriptedUploadServer(
+      [
+        { status: 200, body: { status: 0, uploaded: 500, committed: false, revision: 1 } },
+        { status: 400, body: { status: -1, error: "stop-after-first-batch" } },
+        activeConflict,
+        { status: 200, body: { status: 0, uploaded: 500, committed: false, revision: 1 } },
+        { status: 200, body: { status: 0, uploaded: 1, committed: true, revision: 1 } },
+        { status: 200, body: { status: 0, uploaded: 500, committed: false, revision: 2 } },
+        { status: 200, body: { status: 0, uploaded: 2, committed: true, revision: 2 } },
+      ],
+      async (webhookUrl, requestCount, payloads, identityRequestCount) => {
+        const clock = { TOKENRANK_NOW: "2026-07-12T06:00:00.000Z" };
+        await runCli(["connect", webhookUrl], home);
+        await expect(runCli(["upload"], home, clock)).rejects.toMatchObject({
+          stderr: expect.stringContaining("stop-after-first-batch"),
+        });
+        const originalPending = JSON.parse(
+          await readFile(path.join(home, ".tokenrank", "pending-snapshot.json"), "utf8"),
+        ) as { snapshotId: string };
+        activeConflict.body!.activeSnapshotId = originalPending.snapshotId;
+
+        await writeJsonLog(home, sourcePath, [...originalEvents, addedEvent]);
+        const rotatedWebhookUrl = webhookUrl.replace("test-token", "rotated-token");
+        await runCli(["connect", rotatedWebhookUrl], home);
+        await runCli(["upload"], home, clock);
+
+        expect(requestCount()).toBe(7);
+        expect(identityRequestCount()).toBe(2);
+        const originalFirst = payloads[0] as {
+          snapshotId: string;
+          batchHash: string;
+          entries: unknown[];
+        };
+        const originalSecond = payloads[1] as typeof originalFirst;
+        const replayFirst = payloads[3] as typeof originalFirst;
+        const replaySecond = payloads[4] as typeof originalFirst;
+        expect(replayFirst.snapshotId).toBe(originalFirst.snapshotId);
+        expect(replaySecond.snapshotId).toBe(originalSecond.snapshotId);
+        expect(replayFirst.batchHash).toBe(originalFirst.batchHash);
+        expect(replaySecond.batchHash).toBe(originalSecond.batchHash);
+        expect(replayFirst.entries).toEqual(originalFirst.entries);
+        expect(replaySecond.entries).toEqual(originalSecond.entries);
+
+        const deferredCandidate = payloads[2] as typeof originalFirst;
+        expect((payloads[5] as typeof originalFirst).snapshotId).toBe(
+          deferredCandidate.snapshotId,
+        );
+        expect((payloads[6] as typeof originalFirst).snapshotId).toBe(
+          deferredCandidate.snapshotId,
+        );
+        expect(JSON.stringify(payloads.slice(5, 7))).toContain(addedEvent.model);
+        expect(await exists(path.join(home, ".tokenrank", "pending-snapshot.json"))).toBe(false);
+
+        const state = JSON.parse(
+          await readFile(path.join(home, ".tokenrank", "aggregate-state.json"), "utf8"),
+        ) as {
+          accountId: string;
+          endpointId: string;
+          aggregates: Record<string, unknown>;
+        };
+        expect(state.accountId).toBe(TEST_ACCOUNT_ID);
+        expect(state.endpointId).toBe(testEndpointId(rotatedWebhookUrl));
+        expect(Object.keys(state.aggregates)).toHaveLength(502);
+      },
+    );
+  });
+
+  it("resets local high-water state and health when connecting a different account", async () => {
+    const home = await tempHome();
+    const firstAccountId = "a".repeat(64);
+    const secondAccountId = "b".repeat(64);
+    await writeJsonLog(home, ".codex/sessions/account-switch.json", [
+      {
+        id: "account-a-event",
+        timestamp: "2026-07-12T05:00:00.000Z",
+        model: "account-a-model",
+        usage: { input_tokens: 5, output_tokens: 1 },
+      },
+    ]);
+
+    await withSequencedUploadServer(
+      [200],
+      async (firstWebhookUrl) => {
+        await runCli(["connect", firstWebhookUrl], home);
+        await runCli(["upload"], home, { TOKENRANK_NOW: "2026-07-12T06:00:00.000Z" });
+
+        await writeJsonLog(home, ".codex/sessions/account-switch.json", [
+          {
+            id: "account-a-event",
+            timestamp: "2026-07-12T05:00:00.000Z",
+            model: "account-a-model",
+            usage: { input_tokens: 5, output_tokens: 1 },
+          },
+          {
+            id: "account-b-event",
+            timestamp: "2026-07-13T05:00:00.000Z",
+            model: "account-b-model",
+            usage: { input_tokens: 2, output_tokens: 1 },
+          },
+        ]);
+
+        await withSequencedUploadServer(
+          [200],
+          async (secondWebhookUrl, requestCount, payloads) => {
+            await runCli(["connect", secondWebhookUrl], home);
+            const beforeUpload = await runCliFailure(["status", "--json"], home);
+            expect(JSON.parse(beforeUpload.stdout)).toMatchObject({
+              status: "CONFIGURED",
+              verified: false,
+              healthy: false,
+            });
+
+            await runCli(["upload"], home, { TOKENRANK_NOW: "2026-07-13T06:00:00.000Z" });
+            expect(requestCount()).toBe(1);
+            expect(payloads[0]).toMatchObject({
+              syncMode: "full",
+              cutoverDate: "2026-07-13",
+              entries: [expect.objectContaining({ model: "account-b-model" })],
+            });
+            expect(JSON.stringify(payloads[0])).not.toContain("account-a-model");
+
+            const state = JSON.parse(
+              await readFile(path.join(home, ".tokenrank", "aggregate-state.json"), "utf8"),
+            ) as { accountId: string; cutoverDate: string };
+            expect(state.accountId).toBe(secondAccountId);
+            expect(state.cutoverDate).toBe("2026-07-13");
+          },
+          secondAccountId,
+        );
+      },
+      firstAccountId,
+    );
+  });
+
+  it("requires a successful full sync for the current endpoint before filtered uploads", async () => {
+    const home = await tempHome();
+    const usagePath = path.join(home, "usage.json");
+    await writeFile(
+      usagePath,
+      JSON.stringify({
+        entries: [
+          {
+            date: "2026-07-12",
+            tool: "codex",
+            model: "gpt-5-codex",
+            input: 1,
+            output: 1,
+            cacheRead: 0,
+            cacheWrite: 0,
+          },
+        ],
+      }),
+    );
+
+    let requested = false;
+    await withUploadServer(
+      () => {
+        requested = true;
+      },
+      async (webhookUrl) => {
+        await runCli(["connect", webhookUrl], home);
+        for (const args of [
+          ["upload", "--file", usagePath],
+          ["upload", "--tool", "codex"],
+          ["upload", "--since", "2026-07-12"],
+        ]) {
+          await expect(runCli(args, home)).rejects.toMatchObject({
+            stderr: expect.stringContaining("Run `tokenrank upload` once"),
+          });
+        }
+      },
+    );
+    expect(requested).toBe(false);
+  });
+
+  it("ignores corrupt aggregate rows instead of trusting unsafe high-water state", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, sourceFixturePaths.codex, {
+      id: "safe-event",
+      timestamp: "2026-07-13T04:30:00.000Z",
+      model: "gpt-5-codex",
+      usage: { input_tokens: 2, output_tokens: 1 },
+    });
+
+    await withUploadServer(
+      (payload) => {
+        expect(payload).toMatchObject({
+          syncMode: "full",
+          cutoverDate: "2026-07-13",
+          entries: [expect.objectContaining({ total: 3 })],
+        });
+      },
+      async (webhookUrl) => {
+        const invalidRow = {
+          date: "2026-07-12",
+          tool: "codex",
+          model: "corrupt",
+          input: Number.MAX_SAFE_INTEGER + 1,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: Number.MAX_SAFE_INTEGER + 1,
+        };
+        await runCli(["connect", webhookUrl], home);
+        await seedSuccessfulFullState(home, webhookUrl, {
+          aggregates: { '["wrong-key"]': invalidRow },
+        });
+        await runCli(["upload"], home, { TOKENRANK_NOW: "2026-07-13T05:00:00.000Z" });
+      },
+    );
+  });
+
+  it("replaces an invalid pending snapshot hash and UUID before a full retry", async () => {
+    const home = await tempHome();
+    const aggregate = {
+      date: "2026-07-12",
+      tool: "codex",
+      model: "gpt-5-codex",
+      input: 2,
+      output: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 3,
+    };
+
+    await withUploadServer(
+      (payload) => {
+        expect(payload).toMatchObject({
+          syncMode: "full",
+          snapshotId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+          entries: [aggregate],
+        });
+        expect((payload as { snapshotId: string }).snapshotId).not.toBe("not-a-uuid");
+      },
+      async (webhookUrl) => {
+        await runCli(["connect", webhookUrl], home);
+        await seedSuccessfulFullState(home, webhookUrl, {
+          aggregates: { [JSON.stringify([aggregate.date, aggregate.tool, aggregate.model])]: aggregate },
+        });
+        await writeFile(
+          path.join(home, ".tokenrank", "pending-snapshot.json"),
+          JSON.stringify({
+            accountingVersion: 2,
+            endpointId: "not-a-hash",
+            snapshotDigest: "also-not-a-hash",
+            snapshotId: "not-a-uuid",
+            createdAt: "not-a-timestamp",
+          }),
+        );
+        await runCli(["upload"], home, { TOKENRANK_NOW: "2026-07-13T05:00:00.000Z" });
+        expect(await exists(path.join(home, ".tokenrank", "pending-snapshot.json"))).toBe(false);
+      },
+    );
+  });
+
+  it("keeps one stable snapshot id and a verified hash across full snapshot batches", async () => {
+    const home = await tempHome();
+    await writeJsonLog(
+      home,
+      ".codex/sessions/full-batches.json",
+      Array.from({ length: 501 }, (_, index) => ({
+        id: `full-batch-${index}`,
+        timestamp: "2026-07-12T05:00:00.000Z",
+        model: `gpt-test-${index}`,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      })),
+    );
+
+    await withSequencedUploadServer([200], async (webhookUrl, requestCount, payloads) => {
+      await runCli(["connect", webhookUrl], home);
+      await runCli(["upload"], home, { TOKENRANK_NOW: "2026-07-12T06:00:00.000Z" });
+
+      expect(requestCount()).toBe(2);
+      const batches = payloads as Array<{
+        snapshotId: string;
+        batchIndex: number;
+        batchCount: number;
+        batchHash: string;
+        entries: unknown[];
+      }>;
+      expect(batches.map((batch) => batch.entries.length)).toEqual([500, 1]);
+      expect(new Set(batches.map((batch) => batch.snapshotId)).size).toBe(1);
+      expect(batches.map((batch) => batch.batchIndex)).toEqual([0, 1]);
+      expect(batches.every((batch) => batch.batchCount === 2)).toBe(true);
+      for (const batch of batches) {
+        expect(batch.batchHash).toBe(
+          createHash("sha256").update(JSON.stringify(batch.entries)).digest("hex"),
+        );
+      }
+    });
+  });
+
+  it("does not persist aggregate state when a later full snapshot batch fails", async () => {
+    const home = await tempHome();
+    await writeJsonLog(
+      home,
+      ".codex/sessions/full-retry.json",
+      Array.from({ length: 501 }, (_, index) => ({
+        id: `retry-full-${index}`,
+        timestamp: "2026-07-12T05:00:00.000Z",
+        model: `retry-model-${index}`,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      })),
+    );
+
+    await withSequencedUploadServer([200, 400, 200, 200], async (webhookUrl, requestCount, payloads) => {
+      await runCli(["connect", webhookUrl], home);
+      const env = { TOKENRANK_NOW: "2026-07-12T06:00:00.000Z", TOKENRANK_RETRY_BASE_MS: "1" };
+      await expect(runCli(["upload"], home, env)).rejects.toMatchObject({
+        stderr: expect.stringContaining("temporary"),
+      });
+      expect(await exists(path.join(home, ".tokenrank", "aggregate-state.json"))).toBe(false);
+
+      await runCli(["upload"], home, env);
+      expect(requestCount()).toBe(4);
+      expect((payloads[0] as { snapshotId: string }).snapshotId).toBe(
+        (payloads[2] as { snapshotId: string }).snapshotId,
+      );
+      expect(await exists(path.join(home, ".tokenrank", "aggregate-state.json"))).toBe(true);
+    });
+  });
+
+  it("replays the exact pending full snapshot before sending usage added after the failure", async () => {
+    const home = await tempHome();
+    const sourcePath = ".codex/sessions/pending-replay.json";
+    const originalEvents = Array.from({ length: 501 }, (_, index) => ({
+      id: `pending-replay-${index}`,
+      timestamp: "2026-07-12T05:00:00.000Z",
+      model: `pending-model-${String(index).padStart(3, "0")}`,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }));
+    const addedEvent = {
+      id: "pending-replay-added",
+      timestamp: "2026-07-13T05:30:00.000Z",
+      model: "pending-model-added",
+      usage: { input_tokens: 3, output_tokens: 2 },
+    };
+    await writeJsonLog(home, sourcePath, originalEvents);
+
+    await withScriptedUploadServer(
+      [
+        { status: 200, body: { status: 0, uploaded: 500, committed: false, revision: 1 } },
+        { status: 500 },
+        { status: 500 },
+        { status: 500 },
+        { status: 500 },
+        { status: 200, body: { status: 0, uploaded: 500, committed: false, revision: 1 } },
+        { status: 200, body: { status: 0, uploaded: 1, committed: true, revision: 1 } },
+        { status: 200, body: { status: 0, uploaded: 1, committed: true, revision: 2 } },
+      ],
+      async (webhookUrl, requestCount, payloads) => {
+        const initialEnv = {
+          TOKENRANK_NOW: "2026-07-12T06:00:00.000Z",
+          TOKENRANK_RETRY_BASE_MS: "1",
+          TOKENRANK_TEST_NO_RETRY_JITTER: "1",
+        };
+        const retryEnv = {
+          ...initialEnv,
+          TOKENRANK_NOW: "2026-07-13T06:00:00.000Z",
+        };
+        await runCli(["connect", webhookUrl], home);
+        await expect(runCli(["upload"], home, initialEnv)).rejects.toMatchObject({
+          stderr: expect.stringContaining("temporary"),
+        });
+        expect(requestCount()).toBe(5);
+        expect(await exists(path.join(home, ".tokenrank", "aggregate-state.json"))).toBe(false);
+
+        const pending = JSON.parse(
+          await readFile(path.join(home, ".tokenrank", "pending-snapshot.json"), "utf8"),
+        ) as {
+          snapshotId: string;
+          snapshotDigest: string;
+          batchSize: number;
+          entries: unknown[];
+        };
+        expect(pending).toMatchObject({
+          snapshotId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+          snapshotDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+          batchSize: 500,
+        });
+        expect(pending.entries).toHaveLength(501);
+
+        await writeJsonLog(home, sourcePath, [...originalEvents, addedEvent]);
+        await runCli(["upload"], home, retryEnv);
+        expect(requestCount()).toBe(7);
+
+        type FullBatch = {
+          snapshotId: string;
+          batchHash: string;
+          entries: unknown[];
+        };
+        const originalFirst = payloads[0] as FullBatch;
+        const originalSecond = payloads[1] as FullBatch;
+        const replayFirst = payloads[5] as FullBatch;
+        const replaySecond = payloads[6] as FullBatch;
+        expect(replayFirst.snapshotId).toBe(originalFirst.snapshotId);
+        expect(replaySecond.snapshotId).toBe(originalSecond.snapshotId);
+        expect(replayFirst.batchHash).toBe(originalFirst.batchHash);
+        expect(replaySecond.batchHash).toBe(originalSecond.batchHash);
+        expect(replayFirst.entries).toEqual(originalFirst.entries);
+        expect(replaySecond.entries).toEqual(originalSecond.entries);
+        expect(JSON.stringify([...replayFirst.entries, ...replaySecond.entries])).not.toContain(
+          addedEvent.model,
+        );
+
+        const committedState = JSON.parse(
+          await readFile(path.join(home, ".tokenrank", "aggregate-state.json"), "utf8"),
+        ) as { aggregates: Record<string, unknown> };
+        expect(Object.keys(committedState.aggregates)).toHaveLength(501);
+
+        await runCli(["upload"], home, retryEnv);
+        expect(requestCount()).toBe(8);
+        expect(payloads[7]).toMatchObject({
+          syncMode: "incremental",
+          entries: [expect.objectContaining({ model: addedEvent.model, input: 3, output: 2, total: 5 })],
+        });
+        expect(payloads[7]).not.toHaveProperty("snapshotId");
+      },
+    );
+  });
+
+  it.each(["deleted", "corrupt"] as const)(
+    "recovers the canonical cutover after local aggregate state is %s",
+    async (stateCondition) => {
+      const home = await tempHome();
+      await writeJsonLog(home, ".codex/sessions/cutover-recovery.json", [
+        {
+          id: "cutover-recovery-old",
+          timestamp: "2026-07-12T05:00:00.000Z",
+          model: "cutover-old",
+          usage: { input_tokens: 5, output_tokens: 1 },
+        },
+        {
+          id: "cutover-recovery-new",
+          timestamp: "2026-07-16T05:00:00.000Z",
+          model: "cutover-new",
+          usage: { input_tokens: 2, output_tokens: 1 },
+        },
+      ]);
+
+      await withScriptedUploadServer(
+        [
+          {
+            status: 409,
+            body: {
+              status: -1,
+              error: "CUTOVER_DATE_CONFLICT",
+              expectedCutoverDate: "2026-07-12",
+              revision: 7,
+            },
+          },
+          { status: 200, body: { status: 0, uploaded: 2, committed: true, revision: 8 } },
+        ],
+        async (webhookUrl, requestCount, payloads) => {
+          await runCli(["connect", webhookUrl], home);
+          await seedSuccessfulFullState(home, webhookUrl);
+          const aggregateState = path.join(home, ".tokenrank", "aggregate-state.json");
+          if (stateCondition === "deleted") {
+            await rm(aggregateState, { force: true });
+          } else {
+            await writeFile(aggregateState, "{not valid json");
+          }
+
+          await runCli(["upload"], home, {
+            TOKENRANK_NOW: "2026-07-16T06:00:00.000Z",
+          });
+
+          expect(requestCount()).toBe(2);
+          expect(payloads[0]).toMatchObject({
+            syncMode: "full",
+            cutoverDate: "2026-07-16",
+            entries: [expect.objectContaining({ model: "cutover-new" })],
+          });
+          expect(payloads[1]).toMatchObject({
+            syncMode: "full",
+            cutoverDate: "2026-07-12",
+            entries: [
+              expect.objectContaining({ model: "cutover-old" }),
+              expect.objectContaining({ model: "cutover-new" }),
+            ],
+          });
+          expect((payloads[1] as { snapshotId: string }).snapshotId).not.toBe(
+            (payloads[0] as { snapshotId: string }).snapshotId,
+          );
+
+          const state = JSON.parse(await readFile(aggregateState, "utf8")) as {
+            cutoverDate: string;
+            revision: number;
+            aggregates: Record<string, unknown>;
+          };
+          expect(state.cutoverDate).toBe("2026-07-12");
+          expect(state.revision).toBe(8);
+          expect(Object.keys(state.aggregates)).toHaveLength(2);
+          expect(await exists(path.join(home, ".tokenrank", "pending-snapshot.json"))).toBe(false);
+        },
+      );
+    },
+  );
+
+  it("accepts a server-authoritative cutover one UTC day ahead of the client clock", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, ".codex/sessions/clock-skew-cutover.json", {
+      id: "clock-skew-cutover",
+      timestamp: "2026-07-17T05:00:00.000Z",
+      model: "clock-skew-cutover",
+      usage: { input_tokens: 2, output_tokens: 1 },
+    });
+
+    await withScriptedUploadServer(
+      [
+        {
+          status: 409,
+          body: {
+            status: -1,
+            error: "CUTOVER_DATE_CONFLICT",
+            expectedCutoverDate: "2026-07-17",
+            revision: 4,
+          },
+        },
+        { status: 200, body: { status: 0, uploaded: 1, committed: true, revision: 5 } },
+      ],
+      async (webhookUrl, requestCount, payloads) => {
+        await runCli(["connect", webhookUrl], home);
+        await runCli(["upload"], home, {
+          TOKENRANK_NOW: "2026-07-16T23:30:00.000Z",
+        });
+        expect(requestCount()).toBe(2);
+        expect(payloads[1]).toMatchObject({
+          cutoverDate: "2026-07-17",
+          entries: [expect.objectContaining({ model: "clock-skew-cutover" })],
+        });
+        const state = JSON.parse(
+          await readFile(path.join(home, ".tokenrank", "aggregate-state.json"), "utf8"),
+        ) as { cutoverDate: string; lastFullSyncDate: string };
+        expect(state.cutoverDate).toBe("2026-07-17");
+        expect(state.lastFullSyncDate).toBe("2026-07-17");
+      },
+    );
+  });
+
+  it("limits cutover conflict recovery to one rescan per command", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, ".codex/sessions/cutover-loop.json", [
+      {
+        id: "cutover-loop-old",
+        timestamp: "2026-07-12T05:00:00.000Z",
+        model: "cutover-loop-old",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+      {
+        id: "cutover-loop-new",
+        timestamp: "2026-07-16T05:00:00.000Z",
+        model: "cutover-loop-new",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    ]);
+
+    await withScriptedUploadServer(
+      [
+        {
+          status: 409,
+          body: {
+            status: -1,
+            error: "CUTOVER_DATE_CONFLICT",
+            expectedCutoverDate: "2026-07-12",
+            revision: 7,
+          },
+        },
+        {
+          status: 409,
+          body: {
+            status: -1,
+            error: "CUTOVER_DATE_CONFLICT",
+            expectedCutoverDate: "2026-07-11",
+            revision: 7,
+          },
+        },
+        { status: 200 },
+      ],
+      async (webhookUrl, requestCount) => {
+        await runCli(["connect", webhookUrl], home);
+        await expect(
+          runCli(["upload"], home, { TOKENRANK_NOW: "2026-07-16T06:00:00.000Z" }),
+        ).rejects.toMatchObject({ stderr: expect.stringContaining("CUTOVER_DATE_CONFLICT") });
+        expect(requestCount()).toBe(2);
+        expect(await exists(path.join(home, ".tokenrank", "aggregate-state.json"))).toBe(false);
+        const pending = JSON.parse(
+          await readFile(path.join(home, ".tokenrank", "pending-snapshot.json"), "utf8"),
+        ) as { cutoverDate: string };
+        expect(pending.cutoverDate).toBe("2026-07-12");
+      },
+    );
+  });
+
+  it("does not trust a malformed cutover conflict envelope", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, sourceFixturePaths.codex, {
+      id: "malformed-cutover-conflict",
+      timestamp: "2026-07-16T05:00:00.000Z",
+      model: "gpt-5-codex",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+
+    await withScriptedUploadServer(
+      [
+        {
+          status: 409,
+          body: {
+            status: -1,
+            error: "CUTOVER_DATE_CONFLICT",
+            expectedCutoverDate: "2026-07-12",
+            revision: "7",
+          },
+        },
+        { status: 200 },
+      ],
+      async (webhookUrl, requestCount) => {
+        await runCli(["connect", webhookUrl], home);
+        await expect(
+          runCli(["upload"], home, { TOKENRANK_NOW: "2026-07-16T06:00:00.000Z" }),
+        ).rejects.toMatchObject({ stderr: expect.stringContaining("CUTOVER_DATE_CONFLICT") });
+        expect(requestCount()).toBe(1);
+      },
+    );
+  });
+
+  it("refuses the initial UTC cutover when a recent source was skipped as oversized", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, ".codex/sessions/oversized.json", {
+      id: "oversized-cutover",
+      timestamp: "2026-07-12T05:00:00.000Z",
+      model: "gpt-5-codex",
+      usage: { input_tokens: 10, output_tokens: 5 },
+    });
+
+    await withSequencedUploadServer([200], async (webhookUrl, requestCount) => {
+      await runCli(["connect", webhookUrl], home);
+      await expect(
+        runCli(["upload"], home, {
+          TOKENRANK_NOW: "2026-07-12T06:00:00.000Z",
+          TOKENRANK_MAX_JSON_DOCUMENT_BYTES: "10",
+        }),
+      ).rejects.toMatchObject({ stderr: expect.stringContaining("cutover scan was incomplete") });
+      expect(requestCount()).toBe(0);
+      expect(await exists(path.join(home, ".tokenrank", "aggregate-state.json"))).toBe(false);
+    });
+  });
+
+  it("fails closed on the source file cap without advancing established state", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, ".codex/sessions/cap-a.json", {
+      id: "cap-a",
+      timestamp: "2026-07-12T04:00:00.000Z",
+      model: "cap-a",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    await writeJsonLog(home, ".codex/sessions/cap-b.json", {
+      id: "cap-b",
+      timestamp: "2026-07-12T04:30:00.000Z",
+      model: "cap-b",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+
+    await withSequencedUploadServer(
+      [200],
+      async (webhookUrl, requestCount, _payloads, identityRequestCount) => {
+        await runCli(["connect", webhookUrl], home);
+        await seedSuccessfulFullState(home, webhookUrl, {
+          cutoverDate: "2026-07-12",
+          lastFullSyncDate: "2026-07-12",
+        });
+        const statePath = path.join(home, ".tokenrank", "aggregate-state.json");
+        const before = await readFile(statePath, "utf8");
+        await expect(
+          runCli(["upload"], home, {
+            TOKENRANK_NOW: "2026-07-12T06:00:00.000Z",
+            TOKENRANK_MAX_SOURCE_FILES: "1",
+          }),
+        ).rejects.toMatchObject({ stderr: expect.stringContaining("scan was incomplete") });
+        expect(requestCount()).toBe(0);
+        expect(identityRequestCount()).toBe(0);
+        expect(await readFile(statePath, "utf8")).toBe(before);
+      },
+    );
+  });
+
   it("uploads a missed scheduled boundary once and skips duplicate triggers", async () => {
     const home = await tempHome();
     await writeJsonLog(home, sourceFixturePaths.codex, {
@@ -1417,7 +2792,7 @@ describe("tokenrank collector CLI", () => {
     });
 
     await withSequencedUploadServer([200], async (webhookUrl, requestCount) => {
-      const clock = { TOKENRANK_NOW: "2026-07-12T05:00:00.000Z" };
+      const clock = { TOKENRANK_NOW: "2026-07-12T05:00:00.000Z", TOKENRANK_SCHEDULE_MINUTE: "0" };
       await runCli(["connect", webhookUrl], home);
       await runCli(["daemon", "--once", "--scheduled"], home, clock);
       await runCli(["daemon", "--once", "--scheduled"], home, clock);
@@ -1426,7 +2801,7 @@ describe("tokenrank collector CLI", () => {
       const state = JSON.parse(
         await readFile(path.join(home, ".tokenrank", "service-state.json"), "utf8"),
       ) as { lastScheduledBoundary: string; lastSuccessfulAt: string };
-      expect(state.lastScheduledBoundary).toBe("2026-07-12T04:00:00.000Z");
+      expect(state.lastScheduledBoundary).toBe("2026-07-12T05:00:00.000Z");
       expect(state.lastSuccessfulAt).toBe("2026-07-12T05:00:00.000Z");
     });
   });
@@ -1441,7 +2816,7 @@ describe("tokenrank collector CLI", () => {
     });
 
     await withSequencedUploadServer([200], async (webhookUrl, requestCount) => {
-      const clock = { TOKENRANK_NOW: "2026-07-12T05:00:00.000Z" };
+      const clock = { TOKENRANK_NOW: "2026-07-12T05:00:00.000Z", TOKENRANK_SCHEDULE_MINUTE: "0" };
       await runCli(["connect", webhookUrl], home);
       await runCli(["upload"], home, clock);
       await runCli(["daemon", "--once", "--scheduled"], home, clock);
@@ -1450,7 +2825,7 @@ describe("tokenrank collector CLI", () => {
       const state = JSON.parse(
         await readFile(path.join(home, ".tokenrank", "service-state.json"), "utf8"),
       ) as { lastScheduledBoundary: string };
-      expect(state.lastScheduledBoundary).toBe("2026-07-12T04:00:00.000Z");
+      expect(state.lastScheduledBoundary).toBe("2026-07-12T05:00:00.000Z");
     });
   });
 
@@ -1470,8 +2845,9 @@ describe("tokenrank collector CLI", () => {
     });
 
     await withSequencedUploadServer([200, 200], async (webhookUrl, requestCount) => {
-      const clock = { TOKENRANK_NOW: "2026-07-12T05:00:00.000Z" };
+      const clock = { TOKENRANK_NOW: "2026-07-12T05:00:00.000Z", TOKENRANK_SCHEDULE_MINUTE: "0" };
       await runCli(["connect", webhookUrl], home);
+      await seedSuccessfulFullState(home, webhookUrl);
       await runCli(["upload", "--tool", "codex"], home, clock);
       await runCli(["daemon", "--once", "--scheduled"], home, clock);
 
@@ -1479,11 +2855,11 @@ describe("tokenrank collector CLI", () => {
       const state = JSON.parse(
         await readFile(path.join(home, ".tokenrank", "service-state.json"), "utf8"),
       ) as { lastScheduledBoundary: string };
-      expect(state.lastScheduledBoundary).toBe("2026-07-12T04:00:00.000Z");
+      expect(state.lastScheduledBoundary).toBe("2026-07-12T05:00:00.000Z");
     });
   });
 
-  it("retries a scheduled boundary after a failed upload", async () => {
+  it("retries retryable server failures within the same scheduled boundary", async () => {
     const home = await tempHome();
     await writeJsonLog(home, sourceFixturePaths.codex, {
       id: "retry-codex-event",
@@ -1493,19 +2869,328 @@ describe("tokenrank collector CLI", () => {
     });
 
     await withSequencedUploadServer([500, 200], async (webhookUrl, requestCount) => {
-      const clock = { TOKENRANK_NOW: "2026-07-12T05:00:00.000Z" };
+      const clock = {
+        TOKENRANK_NOW: "2026-07-12T05:00:00.000Z",
+        TOKENRANK_SCHEDULE_MINUTE: "0",
+        TOKENRANK_RETRY_BASE_MS: "1",
+        TOKENRANK_TEST_NO_RETRY_JITTER: "1",
+      };
       await runCli(["connect", webhookUrl], home);
-      await expect(
-        runCli(["daemon", "--once", "--scheduled"], home, clock),
-      ).rejects.toMatchObject({ stderr: expect.stringContaining("temporary") });
       await runCli(["daemon", "--once", "--scheduled"], home, clock);
 
       expect(requestCount()).toBe(2);
       const state = JSON.parse(
         await readFile(path.join(home, ".tokenrank", "service-state.json"), "utf8"),
       ) as { lastScheduledBoundary: string; lastErrorCode: string | null };
-      expect(state.lastScheduledBoundary).toBe("2026-07-12T04:00:00.000Z");
+      expect(state.lastScheduledBoundary).toBe("2026-07-12T05:00:00.000Z");
       expect(state.lastErrorCode).toBeNull();
+    });
+  });
+
+  it("retries 408, 429 Retry-After, and a network disconnect before succeeding", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, sourceFixturePaths.codex, {
+      id: "mixed-retry-event",
+      timestamp: "2026-07-12T04:30:00.000Z",
+      model: "gpt-5-codex",
+      usage: { input_tokens: 8, output_tokens: 4 },
+    });
+
+    await withScriptedUploadServer(
+      [
+        { status: 408 },
+        { status: 429, headers: { "retry-after": "0" } },
+        { destroySocket: true },
+        { status: 200 },
+      ],
+      async (webhookUrl, requestCount) => {
+        await runCli(["connect", webhookUrl], home);
+        await runCli(["upload"], home, {
+          TOKENRANK_NOW: "2026-07-12T05:00:00.000Z",
+          TOKENRANK_RETRY_BASE_MS: "1",
+          TOKENRANK_TEST_NO_RETRY_JITTER: "1",
+        });
+        expect(requestCount()).toBe(4);
+        expect(await exists(path.join(home, ".tokenrank", "aggregate-state.json"))).toBe(true);
+      },
+    );
+  });
+
+  it("applies an absolute deadline to every direct upload attempt", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, sourceFixturePaths.codex, {
+      id: "deadline-direct",
+      timestamp: "2026-07-12T04:30:00.000Z",
+      model: "deadline-direct",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    let uploadRequests = 0;
+    const server = createServer((request, response) => {
+      if (respondToIdentityRequest(request, response)) return;
+      uploadRequests += 1;
+      request.resume();
+      // Intentionally never send response headers or a body.
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("deadline server did not bind");
+      const webhookUrl = `http://127.0.0.1:${address.port}/api/collector/upload/test-token`;
+      await runCli(["connect", webhookUrl], home);
+      await expect(
+        runCli(["upload"], home, {
+          TOKENRANK_NOW: "2026-07-12T05:00:00.000Z",
+          TOKENRANK_REQUEST_TIMEOUT_MS: "100",
+          TOKENRANK_RETRY_BASE_MS: "1",
+          TOKENRANK_TEST_NO_RETRY_JITTER: "1",
+        }),
+      ).rejects.toMatchObject({ stderr: expect.stringContaining("deadline") });
+      expect(uploadRequests).toBe(4);
+      expect(await exists(path.join(home, ".tokenrank", "pending-snapshot.json"))).toBe(true);
+      expect(await exists(path.join(home, ".tokenrank", "collector.lock"))).toBe(false);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("applies the same absolute deadline through an HTTP proxy", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, sourceFixturePaths.codex, {
+      id: "deadline-proxy",
+      timestamp: "2026-07-12T04:30:00.000Z",
+      model: "deadline-proxy",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    let uploadRequests = 0;
+    const proxy = createServer((request, response) => {
+      if (respondToIdentityRequest(request, response)) return;
+      uploadRequests += 1;
+      request.resume();
+      // Keep the proxied POST open until the client aborts at its absolute deadline.
+    });
+    await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = proxy.address();
+      if (!address || typeof address === "string") throw new Error("deadline proxy did not bind");
+      await runCli(
+        ["connect", "http://tokenrank.invalid/api/collector/upload/test-token"],
+        home,
+      );
+      await expect(
+        runCli(["upload"], home, {
+          TOKENRANK_NOW: "2026-07-12T05:00:00.000Z",
+          TOKENRANK_PROXY: `http://127.0.0.1:${address.port}`,
+          TOKENRANK_HTTP_PROXY: `http://127.0.0.1:${address.port}`,
+          TOKENRANK_DISABLE_SYSTEM_PROXY: "1",
+          TOKENRANK_REQUEST_TIMEOUT_MS: "100",
+          TOKENRANK_RETRY_BASE_MS: "1",
+          TOKENRANK_TEST_NO_RETRY_JITTER: "1",
+        }),
+      ).rejects.toMatchObject({ stderr: expect.stringContaining("deadline") });
+      expect(uploadRequests).toBe(4);
+    } finally {
+      proxy.closeAllConnections();
+      await new Promise<void>((resolve) => proxy.close(() => resolve()));
+    }
+  });
+
+  it("keeps the pending snapshot and leaves aggregate state untouched after retry exhaustion", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, sourceFixturePaths.codex, {
+      id: "exhausted-retry-event",
+      timestamp: "2026-07-12T04:30:00.000Z",
+      model: "gpt-5-codex",
+      usage: { input_tokens: 8, output_tokens: 4 },
+    });
+
+    await withScriptedUploadServer(
+      [{ status: 500 }, { status: 500 }, { status: 500 }, { status: 500 }],
+      async (webhookUrl, requestCount) => {
+        await runCli(["connect", webhookUrl], home);
+        await expect(
+          runCli(["upload"], home, {
+            TOKENRANK_NOW: "2026-07-12T05:00:00.000Z",
+            TOKENRANK_RETRY_BASE_MS: "1",
+            TOKENRANK_TEST_NO_RETRY_JITTER: "1",
+          }),
+        ).rejects.toMatchObject({ stderr: expect.stringContaining("temporary") });
+        expect(requestCount()).toBe(4);
+        expect(await exists(path.join(home, ".tokenrank", "aggregate-state.json"))).toBe(false);
+        expect(await exists(path.join(home, ".tokenrank", "pending-snapshot.json"))).toBe(true);
+      },
+    );
+  });
+
+  it("replays incremental WAL after retry exhaustion even when the source file disappears", async () => {
+    const home = await tempHome();
+    const sourcePath = ".codex/sessions/incremental-wal.json";
+    const previous = {
+      date: "2026-07-12",
+      tool: "codex",
+      model: "incremental-wal-model",
+      input: 1,
+      output: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 2,
+    };
+    await writeJsonLog(home, sourcePath, {
+      id: "incremental-wal-event",
+      timestamp: "2026-07-12T04:30:00.000Z",
+      model: previous.model,
+      usage: { input_tokens: 3, output_tokens: 2 },
+    });
+
+    await withScriptedUploadServer(
+      [
+        { status: 500 },
+        { status: 500 },
+        { status: 500 },
+        { status: 500 },
+        { status: 200, body: { status: 0, uploaded: 1, committed: true, revision: 2 } },
+      ],
+      async (webhookUrl, requestCount, payloads) => {
+        await runCli(["connect", webhookUrl], home);
+        await seedSuccessfulFullState(home, webhookUrl, {
+          cutoverDate: "2026-07-12",
+          lastFullSyncDate: "2026-07-12",
+          aggregates: {
+            [JSON.stringify([previous.date, previous.tool, previous.model])]: previous,
+          },
+        });
+        const env = {
+          TOKENRANK_NOW: "2026-07-12T06:00:00.000Z",
+          TOKENRANK_RETRY_BASE_MS: "1",
+          TOKENRANK_TEST_NO_RETRY_JITTER: "1",
+        };
+        await expect(runCli(["upload"], home, env)).rejects.toMatchObject({
+          stderr: expect.stringContaining("temporary"),
+        });
+        expect(requestCount()).toBe(4);
+        const walPath = path.join(home, ".tokenrank", "pending-incremental.json");
+        const wal = JSON.parse(await readFile(walPath, "utf8")) as {
+          digest: string;
+          entries: Array<{ total: number }>;
+        };
+        expect(wal.digest).toMatch(/^[0-9a-f]{64}$/);
+        expect(wal.entries).toEqual([expect.objectContaining({ total: 5 })]);
+
+        await rm(path.join(home, sourcePath), { force: true });
+        await runCli(["upload"], home, env);
+        expect(requestCount()).toBe(5);
+        expect((payloads[4] as { entries: unknown[] }).entries).toEqual(
+          (payloads[0] as { entries: unknown[] }).entries,
+        );
+        expect(await exists(walPath)).toBe(false);
+
+        const state = JSON.parse(
+          await readFile(path.join(home, ".tokenrank", "aggregate-state.json"), "utf8"),
+        ) as { aggregates: Record<string, { total: number }> };
+        expect(Object.values(state.aggregates)).toEqual([
+          expect.objectContaining({ total: 5 }),
+        ]);
+      },
+    );
+  });
+
+  it("does not commit local state when the final server response is not committed", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, sourceFixturePaths.codex, {
+      id: "uncommitted-event",
+      timestamp: "2026-07-12T04:30:00.000Z",
+      model: "gpt-5-codex",
+      usage: { input_tokens: 8, output_tokens: 4 },
+    });
+
+    await withScriptedUploadServer(
+      [{ status: 200, body: { status: 0, uploaded: 1, committed: false, revision: 1 } }],
+      async (webhookUrl, requestCount) => {
+        await runCli(["connect", webhookUrl], home);
+        await expect(
+          runCli(["upload"], home, { TOKENRANK_NOW: "2026-07-12T05:00:00.000Z" }),
+        ).rejects.toMatchObject({ stderr: expect.stringContaining("did not commit") });
+        expect(requestCount()).toBe(1);
+        expect(await exists(path.join(home, ".tokenrank", "aggregate-state.json"))).toBe(false);
+        expect(await exists(path.join(home, ".tokenrank", "pending-snapshot.json"))).toBe(true);
+      },
+    );
+  });
+
+  it("rejects a malformed successful response without corrupting local state", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, sourceFixturePaths.codex, {
+      id: "malformed-success",
+      timestamp: "2026-07-12T04:30:00.000Z",
+      model: "malformed-success",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    await withScriptedUploadServer(
+      [
+        {
+          status: 200,
+          body: { status: 0, uploaded: 1, committed: true, revision: "1" },
+        },
+      ],
+      async (webhookUrl, requestCount) => {
+        await runCli(["connect", webhookUrl], home);
+        await expect(
+          runCli(["upload"], home, { TOKENRANK_NOW: "2026-07-12T05:00:00.000Z" }),
+        ).rejects.toBeTruthy();
+        expect(requestCount()).toBe(1);
+        expect(await exists(path.join(home, ".tokenrank", "aggregate-state.json"))).toBe(false);
+        expect(await exists(path.join(home, ".tokenrank", "pending-snapshot.json"))).toBe(true);
+      },
+    );
+  });
+
+  it("does not acknowledge a batch when the success response reports the wrong upload count", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, sourceFixturePaths.codex, {
+      id: "wrong-upload-count",
+      timestamp: "2026-07-12T04:30:00.000Z",
+      model: "wrong-upload-count",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    await withScriptedUploadServer(
+      [
+        {
+          status: 200,
+          body: { status: 0, uploaded: 0, committed: true, revision: 1 },
+        },
+      ],
+      async (webhookUrl, requestCount) => {
+        await runCli(["connect", webhookUrl], home);
+        await expect(
+          runCli(["upload"], home, { TOKENRANK_NOW: "2026-07-12T05:00:00.000Z" }),
+        ).rejects.toBeTruthy();
+        expect(requestCount()).toBe(1);
+        expect(await exists(path.join(home, ".tokenrank", "aggregate-state.json"))).toBe(false);
+        expect(await exists(path.join(home, ".tokenrank", "pending-snapshot.json"))).toBe(true);
+      },
+    );
+  });
+
+  it("does not blindly retry non-retryable 4xx responses", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, sourceFixturePaths.codex, {
+      id: "bad-request-event",
+      timestamp: "2026-07-12T04:30:00.000Z",
+      model: "gpt-5-codex",
+      usage: { input_tokens: 8, output_tokens: 4 },
+    });
+
+    await withSequencedUploadServer([400, 200], async (webhookUrl, requestCount) => {
+      await runCli(["connect", webhookUrl], home);
+      await expect(
+        runCli(["daemon", "--once", "--scheduled"], home, {
+          TOKENRANK_NOW: "2026-07-12T05:00:00.000Z",
+          TOKENRANK_SCHEDULE_MINUTE: "0",
+          TOKENRANK_RETRY_BASE_MS: "1",
+        }),
+      ).rejects.toMatchObject({ stderr: expect.stringContaining("temporary") });
+      expect(requestCount()).toBe(1);
+      expect(await exists(path.join(home, ".tokenrank", "aggregate-state.json"))).toBe(false);
     });
   });
 
@@ -1534,9 +3219,81 @@ describe("tokenrank collector CLI", () => {
     });
   });
 
+  it("fails a manual upload on an active lock while scheduled runs skip quietly", async () => {
+    const home = await tempHome();
+    const clock = { TOKENRANK_NOW: "2026-07-12T05:00:00.000Z" };
+    await mkdir(path.join(home, ".tokenrank"), { recursive: true });
+    await writeFile(
+      path.join(home, ".tokenrank", "collector.lock"),
+      JSON.stringify({ pid: process.pid, createdAt: "2000-01-01T00:00:00.000Z" }),
+    );
+
+    let requested = false;
+    await withUploadServer(
+      () => {
+        requested = true;
+      },
+      async (webhookUrl) => {
+        await runCli(["connect", webhookUrl], home);
+        const manual = await runCliFailure(["upload"], home, clock);
+        expect(manual.code).toBe(1);
+        expect(manual.stderr).toContain("Another TokenRank upload is already running");
+        expect(manual.stderr).not.toContain(webhookUrl);
+        expect(manual.stderr).not.toContain(home);
+        expect(
+          JSON.parse(
+            await readFile(path.join(home, ".tokenrank", "service-state.json"), "utf8"),
+          ),
+        ).toMatchObject({ lastErrorCode: "UPLOAD_FAILED" });
+
+        await runCli(["daemon", "--once", "--scheduled"], home, clock);
+        expect(requested).toBe(false);
+        expect(await exists(path.join(home, ".tokenrank", "collector.lock"))).toBe(true);
+      },
+    );
+  });
+
+  it("allows only one malformed-lock takeover under concurrent uploads", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, sourceFixturePaths.codex, {
+      id: "malformed-lock-race",
+      timestamp: "2026-07-12T04:30:00.000Z",
+      model: "malformed-lock-race",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    await mkdir(path.join(home, ".tokenrank"), { recursive: true });
+    await writeFile(path.join(home, ".tokenrank", "collector.lock"), "{malformed");
+    let requests = 0;
+
+    await withUploadServer(
+      async () => {
+        requests += 1;
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      },
+      async (webhookUrl) => {
+        await runCli(["connect", webhookUrl], home);
+        const env = { TOKENRANK_NOW: "2026-07-12T05:00:00.000Z" };
+        const results = await Promise.allSettled([
+          runCli(["upload"], home, env),
+          runCli(["upload"], home, env),
+        ]);
+        expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+        const rejected = results.find((result) => result.status === "rejected");
+        expect(rejected).toMatchObject({
+          status: "rejected",
+          reason: expect.objectContaining({
+            stderr: expect.stringContaining("already running"),
+          }),
+        });
+        expect(requests).toBe(1);
+        expect(await exists(path.join(home, ".tokenrank", "collector.lock"))).toBe(false);
+      },
+    );
+  });
+
   it("installs, reports, and uninstalls the background service config", async () => {
     const home = await tempHome();
-    const darwinEnv = { TOKENRANK_TEST_PLATFORM: "darwin" };
+    const darwinEnv = { TOKENRANK_TEST_PLATFORM: "darwin", TOKENRANK_SCHEDULE_MINUTE: "17" };
     await runCli(["connect", "https://tokenrank.test/api/collector/upload/secret"], home, darwinEnv);
 
     const install = await runCli(["service", "install", "--interval", "120"], home, darwinEnv);
@@ -1544,11 +3301,10 @@ describe("tokenrank collector CLI", () => {
     const plist = await readFile(plistPath, "utf8");
 
     expect(install.stdout).toContain("Ignored --interval");
-    expect(install.stdout).toContain("daily at 12:00 and 24:00");
+    expect(install.stdout).toContain("hourly at minute 17");
     expect(plist).toContain("daemon");
     expect(plist).toContain("<key>StartCalendarInterval</key>");
-    expect(plist).toContain("<integer>0</integer>");
-    expect(plist).toContain("<integer>12</integer>");
+    expect(plist).toContain("<integer>17</integer>");
     expect(plist).not.toContain("StartInterval");
     expect(plist).toContain("<key>RunAtLoad</key>");
     expect(plist).toContain("<true/>");
@@ -1585,23 +3341,23 @@ describe("tokenrank collector CLI", () => {
     });
   });
 
-  it("defaults the background service to fixed 00:00 and 12:00 collection times", async () => {
+  it("uses one stable device-specific minute for hourly launchd collection", async () => {
     const home = await tempHome();
-    const darwinEnv = { TOKENRANK_TEST_PLATFORM: "darwin" };
+    const darwinEnv = { TOKENRANK_TEST_PLATFORM: "darwin", TOKENRANK_SCHEDULE_MINUTE: "17" };
     await runCli(["connect", "https://tokenrank.test/api/collector/upload/secret"], home, darwinEnv);
 
     await runCli(["service", "install"], home, darwinEnv);
     const plistPath = path.join(home, "Library", "LaunchAgents", "com.tokenrank.collector.plist");
     const plist = await readFile(plistPath, "utf8");
 
-    expect(plist).toContain("<key>Hour</key>\n      <integer>0</integer>");
-    expect(plist).toContain("<key>Hour</key>\n      <integer>12</integer>");
-    expect(plist).toContain("<key>Minute</key>\n      <integer>0</integer>");
+    expect(plist).not.toContain("<key>Hour</key>");
+    expect(plist).toContain("<key>Minute</key>\n    <integer>17</integer>");
+    expect(plist).toContain("<key>RunAtLoad</key>");
   });
 
-  it("installs a systemd user timer for fixed 00:00 and 12:00 collection times", async () => {
+  it("installs a persistent hourly systemd user timer at the stable minute", async () => {
     const home = await tempHome();
-    const linuxEnv = { TOKENRANK_TEST_PLATFORM: "linux" };
+    const linuxEnv = { TOKENRANK_TEST_PLATFORM: "linux", TOKENRANK_SCHEDULE_MINUTE: "23" };
     await runCli(["connect", "https://tokenrank.test/api/collector/upload/secret"], home, linuxEnv);
 
     const install = await runCli(["service", "install"], home, linuxEnv);
@@ -1610,12 +3366,12 @@ describe("tokenrank collector CLI", () => {
     const service = await readFile(servicePath, "utf8");
     const timer = await readFile(timerPath, "utf8");
 
-    expect(install.stdout).toContain("daily at 12:00 and 24:00");
+    expect(install.stdout).toContain("hourly at minute 23");
     expect(service).toContain("daemon --once");
     expect(service).toContain("--scheduled");
     expect(service).not.toContain("--interval");
-    expect(timer).toContain("OnCalendar=*-*-* 00:00:00");
-    expect(timer).toContain("OnCalendar=*-*-* 12:00:00");
+    expect(timer).toContain("OnCalendar=*-*-* *:23:00");
+    expect(timer).toContain("Persistent=true");
 
     const status = await runCli(["service", "status"], home, linuxEnv);
     expect(status.stdout).toContain("Installed");
@@ -1628,7 +3384,7 @@ describe("tokenrank collector CLI", () => {
 
   it("installs a hidden Windows task with missed-run and logon recovery", async () => {
     const home = await tempHome();
-    const windowsEnv = { TOKENRANK_TEST_PLATFORM: "win32" };
+    const windowsEnv = { TOKENRANK_TEST_PLATFORM: "win32", TOKENRANK_SCHEDULE_MINUTE: "31" };
     await runCli(["connect", "https://tokenrank.test/api/collector/upload/secret"], home, windowsEnv);
 
     const install = await runCli(["service", "install"], home, windowsEnv);
@@ -1639,7 +3395,7 @@ describe("tokenrank collector CLI", () => {
     expect([...taskBytes.subarray(0, 2)]).toEqual([0xff, 0xfe]);
     const task = taskBytes.subarray(2).toString("utf16le");
 
-    expect(install.stdout).toContain("daily at 12:00 and 24:00");
+    expect(install.stdout).toContain("hourly at minute 31");
     expect(runner).toContain("daemon --once");
     expect(runner).toContain("--scheduled");
     expect(runner).toContain("tokenrank.mjs");
@@ -1647,7 +3403,9 @@ describe("tokenrank collector CLI", () => {
     expect(runner).not.toContain("tokenrank.cmd");
     expect(task).toContain('<?xml version="1.0" encoding="UTF-16"?>');
     expect(task).toContain("<LogonTrigger>");
-    expect(task.match(/<CalendarTrigger>/g)).toHaveLength(2);
+    expect(task.match(/<CalendarTrigger>/g)).toHaveLength(1);
+    expect(task).toContain("<StartBoundary>2020-01-01T00:31:00</StartBoundary>");
+    expect(task).toContain("<Interval>PT1H</Interval>");
     expect(task).toContain("<StartWhenAvailable>true</StartWhenAvailable>");
     expect(task).toContain("<Hidden>true</Hidden>");
     expect(task).toContain("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>");

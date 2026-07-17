@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -36,32 +36,42 @@ const TOOL_KEYS = [
   "continue",
 ];
 const CACHE_INCLUDED_INPUT_TOOLS = new Set(["codex"]);
+const MODEL_MAX_LENGTH = 120;
+const MODEL_HASH_LENGTH = 16;
 const DEFAULT_MAX_JSONL_LINE_BYTES = 64 * 1024 * 1024;
 const DEFAULT_MAX_JSON_DOCUMENT_BYTES = 64 * 1024 * 1024;
 const cliMessages = {
   en: {
     active: "ACTIVE",
-    ascendRanks: "ASCEND RANKS.",
+    aggregatesOnly: "AGGREGATES ONLY",
     aggregateRows: "aggregate rows",
     allTools: "all tools",
     batch: "batch {current}/{total}: {count} {rows}",
     buildPayload: "Build payload",
-    burnTokens: "BURN TOKENS.",
-    collectorStarting: "COLLECTOR STARTING",
+    checkingBackgroundSync: "Checking background sync",
+    checkingCollectorStatus: "Checking collector status",
+    collectorSubtitle: "Local AI usage collector",
     commands: "Commands:",
     connect: "Connect",
     connected: "CONNECTED",
+    contentStaysLocal: "CONTENT STAYS LOCAL",
     collectionSchedule: "Collection schedule: {schedule}",
-    dailySchedule: "daily at 12:00 and 24:00",
+    collectorLocked: "Another TokenRank upload is already running. Wait and try again.",
+    dailySchedule: "hourly at minute {minute}, with missed-run recovery",
     detectedNoRows: "DETECTED / NO TOKEN ROWS",
-    done: "DONE",
+    discoveringSourceProgress: "Discovering {source} · {current}/{total} sources · {files} files",
+    doctorProgressSummary: "Diagnosis complete · {sources} sources · {files} files · {rows} rows · {ready} ready",
     error: "ERROR",
     exactSourceRequired: "EXACT SOURCE REQUIRED",
     files: "files",
+    filteredUploadRequiresFullSync:
+      "Run `tokenrank upload` once for this connection before using --file, --tool, or --since.",
     gridStatus: "GRID STATUS",
     ignoredInterval: "Ignored --interval: background collection is fixed to {schedule}.",
+    incompleteCutover: "The initial UTC cutover scan was incomplete; no snapshot was uploaded.",
     installed: "Installed: {file}",
     installedBackgroundService: "Installed background service: {file}",
+    installingBackgroundSync: "Installing background sync",
     invalidDate: "entry.date must be a real date in YYYY-MM-DD format.",
     invalidInterval: "--interval must be an integer of at least 60 seconds.",
     invalidNow: "TOKENRANK_NOW must be a valid date and time.",
@@ -74,8 +84,10 @@ const cliMessages = {
     lastError: "LAST ERROR",
     lastSuccess: "LAST SUCCESS",
     loadedUsageFile: "Loaded usage file",
+    loadingUsageFileProgress: "Loading {file}",
     localSourceAdapters: "LOCAL SOURCE ADAPTERS",
     localSources: "LOCAL SOURCES",
+    locations: "locations",
     missingFile: "Missing the usage.json path after --file.",
     missingOptionValue: "Missing a value for {name}.",
     missingWebhook: "Missing webhook URL. Generate one in the TokenRank dashboard first.",
@@ -91,16 +103,20 @@ const cliMessages = {
     privacy: "PRIVATE CONTENT NEVER LEAVES THIS MACHINE",
     proxyConnectionFailed: "Proxy connection failed: HTTP {status}",
     proxyResponseInvalid: "The proxy response is invalid.",
-    publicRankSignal: "PUBLIC RANK SIGNAL",
-    rankSignal: "RANK SIGNAL",
+    requestTimedOut: "The webhook request deadline was exceeded.",
     ready: "READY",
+    removingBackgroundSync: "Removing background sync",
     removedWebhook: "Removed local webhook configuration.",
     row: "row",
     rows: "rows",
     savedWebhook: "Saved webhook.",
     scanComplete: "Scan complete",
+    scanProgressSummary: "Scan complete · {sources} sources · {files} files · {rows} rows · {aggregates} aggregates",
+    snapshotNotCommitted: "The server did not commit the full snapshot.",
+    snapshotTooLarge: "The full snapshot exceeds the 100-batch safety limit.",
     scanLocalUsage: "Scan local usage",
     scanning: "Scanning {source}",
+    scanningSourceProgress: "Scanning {source} · {current}/{total} sources · {fileCurrent}/{fileTotal} files · {rows} rows",
     scope: "scope: {scope}",
     serviceInstalled: "SERVICE INSTALLED",
     serviceNotInstalled: "SERVICE NOT INSTALLED",
@@ -121,6 +137,8 @@ const cliMessages = {
     uploadComplete: "UPLOAD COMPLETE",
     uploadEndpoint: "UPLOAD ENDPOINT",
     uploadFailed: "Upload failed: {error}",
+    uploadBatchProgress: "Uploading batch {current}/{total} · {count} {rows}",
+    uploadProgressSummary: "Upload complete · {count} {rows} · {batches} batches",
     uploadSuccess: "Upload complete: {count} {rows}",
     uploading: "Uploading {count} {rows} in {batches} batch(es)",
     usageDescription: "usage.json may be either { entries: [...] } or an array of aggregate entries.",
@@ -130,27 +148,35 @@ const cliMessages = {
   },
   zh: {
     active: "活跃",
-    ascendRanks: "RANKING 狂飙。",
+    aggregatesOnly: "仅聚合数据",
     aggregateRows: "聚合记录",
     allTools: "全部工具",
     batch: "批次 {current}/{total}：{count} {rows}",
     buildPayload: "构建上传数据",
-    burnTokens: "TOKEN 燃烧。",
-    collectorStarting: "采集器启动中",
+    checkingBackgroundSync: "正在检查后台同步",
+    checkingCollectorStatus: "正在检查采集器状态",
+    collectorSubtitle: "本地 AI Token 用量采集器",
     commands: "命令：",
     connect: "连接",
     connected: "已连接",
+    contentStaysLocal: "内容留在本机",
     collectionSchedule: "采集时间：{schedule}",
-    dailySchedule: "每天 12:00 和 24:00",
+    collectorLocked: "另一个 TokenRank 上传正在运行，请稍后重试。",
+    dailySchedule: "每小时第 {minute} 分钟，并在错过后补跑",
     detectedNoRows: "已检测 / 暂无 Token 记录",
-    done: "完成",
+    discoveringSourceProgress: "发现 {source} · 来源 {current}/{total} · 已发现 {files} 个文件",
+    doctorProgressSummary: "诊断完成 · {sources} 个来源 · {files} 个文件 · {rows} 条记录 · {ready} 个就绪",
     error: "错误",
     exactSourceRequired: "需要精确数据源",
     files: "个文件",
+    filteredUploadRequiresFullSync:
+      "当前连接请先运行一次 `tokenrank upload` 完成全量同步，再使用 --file、--tool 或 --since。",
     gridStatus: "运行状态",
     ignoredInterval: "已忽略 --interval：后台采集时间固定为{schedule}。",
+    incompleteCutover: "首次 UTC 切换扫描不完整，未上传快照。",
     installed: "已安装：{file}",
     installedBackgroundService: "已安装后台服务：{file}",
+    installingBackgroundSync: "正在安装后台同步",
     invalidDate: "entry.date 必须是 YYYY-MM-DD 格式的真实日期。",
     invalidInterval: "--interval 必须是不小于 60 的整数秒。",
     invalidNow: "TOKENRANK_NOW 必须是有效时间。",
@@ -163,8 +189,10 @@ const cliMessages = {
     lastError: "最近错误",
     lastSuccess: "最近成功",
     loadedUsageFile: "已载入用量文件",
+    loadingUsageFileProgress: "正在载入 {file}",
     localSourceAdapters: "本地数据源适配器",
     localSources: "本地来源",
+    locations: "个位置",
     missingFile: "缺少 --file 后面的 usage.json 路径。",
     missingOptionValue: "缺少 {name} 参数值。",
     missingWebhook: "缺少 webhook URL。请先在 TokenRank 仪表盘生成 webhook。",
@@ -180,16 +208,20 @@ const cliMessages = {
     privacy: "私密内容绝不离开本机",
     proxyConnectionFailed: "代理连接失败：HTTP {status}",
     proxyResponseInvalid: "代理响应格式不正确。",
-    publicRankSignal: "公开排名信号",
-    rankSignal: "排名信号",
+    requestTimedOut: "webhook 请求超过截止时间。",
     ready: "就绪",
+    removingBackgroundSync: "正在移除后台同步",
     removedWebhook: "已移除本机 webhook 配置。",
     row: "条记录",
     rows: "条记录",
     savedWebhook: "已保存 webhook。",
     scanComplete: "扫描完成",
+    scanProgressSummary: "扫描完成 · {sources} 个来源 · {files} 个文件 · {rows} 条记录 · {aggregates} 条聚合",
+    snapshotNotCommitted: "服务端尚未提交完整快照。",
+    snapshotTooLarge: "完整快照超过 100 批安全上限。",
     scanLocalUsage: "扫描本地用量",
     scanning: "正在扫描 {source}",
+    scanningSourceProgress: "扫描 {source} · 来源 {current}/{total} · 文件 {fileCurrent}/{fileTotal} · {rows} 条记录",
     scope: "范围：{scope}",
     serviceInstalled: "后台服务已安装",
     serviceNotInstalled: "后台服务未安装",
@@ -210,12 +242,69 @@ const cliMessages = {
     uploadComplete: "上传完成",
     uploadEndpoint: "上传端点",
     uploadFailed: "上传失败：{error}",
+    uploadBatchProgress: "正在上传批次 {current}/{total} · {count} {rows}",
+    uploadProgressSummary: "上传完成 · {count} {rows} · {batches} 个批次",
     uploadSuccess: "上传成功：{count} {rows}",
     uploading: "正在上传 {count} {rows}，共 {batches} 个批次",
     usageDescription: "usage.json 可以是 { entries: [...] }，也可以是聚合记录数组。",
     usageTitle: "TokenRank 采集器",
     webhookConfigMissing: "请先运行 tokenrank connect <webhook-url>。",
     webhookReady: "webhook 已就绪",
+  },
+};
+
+const cliHelp = {
+  en: {
+    usage: "Usage",
+    commands: "Commands",
+    options: "Global options",
+    commandRows: [
+      ["tools", "List supported AI tools"],
+      ["sources", "Show local source adapters"],
+      ["status [--json]", "Show verified connection and sync health"],
+      ["doctor", "Diagnose every local source"],
+      ["preview [filters]", "Preview aggregate usage before upload"],
+      ["connect <webhook-url>", "Connect a private TokenRank webhook"],
+      ["logout", "Remove the local webhook configuration"],
+      ["upload [filters]", "Scan and upload aggregate usage"],
+      ["daemon [--once]", "Run uploads in the foreground"],
+      ["service install", "Install scheduled background sync"],
+      ["service status", "Check the background sync service"],
+      ["service uninstall", "Remove scheduled background sync"],
+    ],
+    optionRows: [
+      ["--tool <tool-id>", "Limit preview or upload to one tool"],
+      ["--since <YYYY-MM-DD>", "Only include usage on or after a date"],
+      ["--file <usage.json>", "Upload an aggregate usage file"],
+      ["--lang <en|zh|auto>", "Override the detected language"],
+      ["-h, --help", "Show this help"],
+    ],
+  },
+  zh: {
+    usage: "用法",
+    commands: "命令",
+    options: "全局选项",
+    commandRows: [
+      ["tools", "列出支持的 AI 工具"],
+      ["sources", "查看本地数据源适配器"],
+      ["status [--json]", "查看已验证的连接与同步健康状态"],
+      ["doctor", "诊断全部本地数据源"],
+      ["preview [筛选参数]", "上传前预览聚合用量"],
+      ["connect <webhook-url>", "连接私人 TokenRank webhook"],
+      ["logout", "移除本机 webhook 配置"],
+      ["upload [筛选参数]", "扫描并上传聚合用量"],
+      ["daemon [--once]", "在前台运行上传任务"],
+      ["service install", "安装后台定时同步"],
+      ["service status", "检查后台同步服务"],
+      ["service uninstall", "移除后台定时同步"],
+    ],
+    optionRows: [
+      ["--tool <tool-id>", "只预览或上传一个工具"],
+      ["--since <YYYY-MM-DD>", "只包含该日期及之后的用量"],
+      ["--file <usage.json>", "上传聚合用量文件"],
+      ["--lang <en|zh|auto>", "覆盖自动检测的语言"],
+      ["-h, --help", "显示帮助"],
+    ],
   },
 };
 
@@ -337,7 +426,14 @@ function isUnknownModel(value) {
 
 function normalizeModel(value, tool) {
   const model = typeof value === "string" ? value.trim() : "";
-  return isUnknownModel(model) ? unattributedModelForTool(tool) : model;
+  const normalized = isUnknownModel(model) ? unattributedModelForTool(tool) : model;
+
+  if (normalized.length <= MODEL_MAX_LENGTH) return normalized;
+
+  const suffix = `~${createHash("sha256").update(normalized).digest("hex").slice(0, MODEL_HASH_LENGTH)}`;
+  let prefix = normalized.slice(0, MODEL_MAX_LENGTH - suffix.length);
+  if (/[\uD800-\uDBFF]$/u.test(prefix)) prefix = prefix.slice(0, -1);
+  return `${prefix}${suffix}`;
 }
 
 const cliDir = path.dirname(fileURLToPath(import.meta.url));
@@ -347,24 +443,26 @@ const packageJson = await readCliPackageJson([
   path.join(process.env.TOKENRANK_HOME ?? path.join(homedir(), ".tokenrank"), "package.json"),
 ]);
 const clientVersion = String(packageJson.version ?? "0.0.0");
-const defaultCollectorIntervalSeconds = 12 * 60 * 60;
-const collectorScheduleHours = [0, 12];
+const accountingVersion = 2;
+const defaultCollectorIntervalSeconds = 60 * 60;
+const uploadBatchSize = 500;
+const maxUploadAttempts = 4;
+const TOKEN_COUNT_FIELDS = ["input", "output", "cacheRead", "cacheWrite", "total"];
 const terminalIsTty = process.env.TOKENRANK_TEST_TTY === "1" || Boolean(process.stdout.isTTY);
+const progressIsTty = process.env.TOKENRANK_TEST_TTY === "1" || Boolean(process.stderr.isTTY);
 const terminalColumns = Math.max(40, Number(process.env.COLUMNS || process.stdout.columns || 80));
 const useColor = process.env.NO_COLOR !== "1" && terminalIsTty;
-const useAnimation = useColor && process.env.TOKENRANK_NO_ANIMATION !== "1";
+const useProgressColor = process.env.NO_COLOR !== "1" && progressIsTty;
+const progressEnabled = progressIsTty && process.env.TOKENRANK_NO_PROGRESS !== "1";
+const useProgressAnimation = progressEnabled && process.env.TOKENRANK_NO_ANIMATION !== "1";
 const cliPalette = {
-  background: [7, 9, 7],
   ivory: [242, 241, 232],
   muted: [133, 139, 128],
   lime: [214, 255, 63],
   orange: [255, 91, 53],
-  surface: [13, 16, 14],
-  surface2: [20, 24, 20],
   line: [52, 58, 51],
 };
-const scoreboardMaxWidth = 50;
-let sectionIndex = 0;
+const uiMaxWidth = 78;
 
 function fitLine(value, width) {
   const trimmed = trimLine(value, width);
@@ -410,27 +508,54 @@ function isFullWidthCodePoint(codePoint) {
   );
 }
 
-function scoreboardWidth() {
-  return Math.min(terminalColumns, scoreboardMaxWidth);
+function uiWidth() {
+  return Math.min(terminalColumns, uiMaxWidth);
 }
 
-function trueColor(value, foreground, background) {
+function trueColor(value, foreground) {
   if (!useColor) {
     return value;
   }
 
-  const backgroundCode = background ? `\x1b[48;2;${background.join(";")}m` : "";
-  return `${backgroundCode}\x1b[38;2;${foreground.join(";")}m${value}\x1b[0m`;
+  return `\x1b[38;2;${foreground.join(";")}m${value}\x1b[0m`;
+}
+
+function padCell(value, width, align = "left") {
+  const safe = trimLine(String(value), width);
+  const padding = " ".repeat(Math.max(0, width - displayWidth(safe)));
+  return align === "right" ? `${padding}${safe}` : `${safe}${padding}`;
+}
+
+function wrapDisplayLine(value, width) {
+  const lines = [];
+  let line = "";
+  let lineWidth = 0;
+
+  for (const character of String(value)) {
+    const characterWidth = isFullWidthCodePoint(character.codePointAt(0) ?? 0) ? 2 : 1;
+    if (line && lineWidth + characterWidth > width) {
+      lines.push(line.trimEnd());
+      line = "";
+      lineWidth = 0;
+    }
+    line += character;
+    lineWidth += characterWidth;
+  }
+
+  if (line || lines.length === 0) {
+    lines.push(line.trimEnd());
+  }
+
+  return lines;
 }
 
 function panelLine(left, right = "", options = {}) {
-  const innerWidth = Math.max(1, scoreboardWidth() - 4);
+  const innerWidth = Math.max(1, uiWidth() - 4);
   const safeRight = trimLine(right, Math.max(0, innerWidth - 1));
   const leftWidth = Math.max(0, innerWidth - displayWidth(safeRight) - (safeRight ? 1 : 0));
   const leftValue = options.leftSegments?.map((segment) => segment.value).join("") ?? left;
   const safeLeft = trimLine(leftValue, leftWidth);
   const gap = " ".repeat(Math.max(0, innerWidth - displayWidth(safeLeft) - displayWidth(safeRight)));
-  const borderColor = options.accent ? cliPalette.orange : cliPalette.line;
   let renderedLeft = trueColor(safeLeft, options.leftColor ?? cliPalette.ivory);
 
   if (options.leftSegments) {
@@ -444,112 +569,226 @@ function panelLine(left, right = "", options = {}) {
       .join("");
   }
 
-  return `${trueColor("│ ", borderColor)}${renderedLeft}${gap}${trueColor(safeRight, options.rightColor ?? cliPalette.lime)}${trueColor(" │", cliPalette.line)}`;
+  return `${trueColor("│ ", cliPalette.line)}${renderedLeft}${gap}${trueColor(safeRight, options.rightColor ?? cliPalette.lime)}${trueColor(" │", cliPalette.line)}`;
+}
+
+function panelLines(rows, options = {}) {
+  const width = uiWidth();
+  const accentColor = options.accentColor ?? cliPalette.lime;
+  const title = trimLine(String(options.title ?? "").toUpperCase(), Math.max(0, width - 6));
+  const top = title
+    ? `${trueColor("╭─ ", cliPalette.line)}${trueColor(title, accentColor)}${trueColor(` ${"─".repeat(Math.max(0, width - displayWidth(title) - 5))}╮`, cliPalette.line)}`
+    : trueColor(`╭${"─".repeat(Math.max(0, width - 2))}╮`, cliPalette.line);
+  const divider = trueColor(`├${"─".repeat(Math.max(0, width - 2))}┤`, cliPalette.line);
+  const footer = trueColor(`╰${"─".repeat(Math.max(0, width - 2))}╯`, cliPalette.line);
+
+  return [
+    top,
+    ...rows.map((row) =>
+      row.divider ? divider : panelLine(row.left ?? "", row.right ?? "", row),
+    ),
+    footer,
+  ];
 }
 
 function printPanel(rows, options = {}) {
-  const width = scoreboardWidth();
-  const border = `┌${"─".repeat(Math.max(0, width - 2))}┐`;
-  const footer = `└${"─".repeat(Math.max(0, width - 2))}┘`;
-
   console.log("");
-  console.log(trueColor(border, cliPalette.line));
-  for (const row of rows) {
-    console.log(panelLine(row.left, row.right, { ...row, accent: options.accent }));
-  }
-  console.log(trueColor(footer, cliPalette.line));
+  console.log(panelLines(rows, options).join("\n"));
 }
 
 function renderConnectionPanel(host) {
-  printPanel([
-    { left: message("uploadEndpoint"), right: message("connected"), leftColor: cliPalette.muted },
-    { left: host, leftColor: cliPalette.ivory },
-  ]);
+  printPanel(
+    [
+      {
+        left: host,
+        right: `● ${message("connected")}`,
+        leftColor: cliPalette.ivory,
+        rightColor: cliPalette.lime,
+      },
+    ],
+    { title: message("uploadEndpoint") },
+  );
 }
 
-function renderSourceProgress(label, completed, total) {
-  if (!useAnimation) {
-    return;
+function formatProgressElapsed(milliseconds) {
+  if (milliseconds < 1000) {
+    return `${milliseconds}ms`;
   }
 
-  const counter = `${String(completed).padStart(2, "0")} / ${String(total).padStart(2, "0")}`;
-  const line = fitLine(`${message("localSources")}  ${counter}  ${label.toUpperCase()}`, scoreboardWidth());
-  process.stdout.write(`\r${trueColor(line, cliPalette.muted)}`);
+  const seconds = milliseconds / 1000;
+  if (seconds < 60) {
+    return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}s`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = Math.round(seconds % 60);
+  return `${minutes}m ${remainingSeconds}s`;
 }
 
-function clearSourceProgress() {
-  if (useAnimation) {
-    process.stdout.write("\r\x1b[2K");
+function progressColor(value, foreground) {
+  if (!useProgressColor) {
+    return value;
   }
+
+  return `\x1b[38;2;${foreground.join(";")}m${value}\x1b[0m`;
+}
+
+function createProgressReporter() {
+  const frames = ["◐", "◓", "◑", "◒"];
+  let frameIndex = 0;
+  let startedAt = 0;
+  let currentMessage = "";
+  let timer = null;
+  let lastRenderedAt = 0;
+
+  function render() {
+    if (!progressEnabled || !currentMessage) {
+      return;
+    }
+
+    const elapsed = formatProgressElapsed(Date.now() - startedAt);
+    const frame = useProgressAnimation ? frames[frameIndex % frames.length] : "●";
+    frameIndex += 1;
+    const plain = fitLine(`  ${frame}  ${currentMessage} · ${elapsed}`, uiWidth());
+    process.stderr.write(`\r${progressColor(plain, cliPalette.lime)}`);
+    lastRenderedAt = Date.now();
+  }
+
+  function stopTimer() {
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+  }
+
+  function clear() {
+    if (!progressEnabled || !startedAt) {
+      return;
+    }
+
+    stopTimer();
+    process.stderr.write(`\r${" ".repeat(uiWidth())}\r`);
+    currentMessage = "";
+    startedAt = 0;
+  }
+
+  return {
+    start(label) {
+      if (!progressEnabled) {
+        return;
+      }
+
+      stopTimer();
+      startedAt = Date.now();
+      currentMessage = label;
+      frameIndex = 0;
+      lastRenderedAt = 0;
+      render();
+      if (useProgressAnimation) {
+        timer = setInterval(render, 120);
+        timer.unref?.();
+      }
+    },
+    update(label) {
+      if (!progressEnabled) {
+        return;
+      }
+
+      currentMessage = label;
+      if (!useProgressAnimation && Date.now() - lastRenderedAt >= 120) {
+        render();
+      }
+    },
+    finish(label) {
+      if (!progressEnabled || !startedAt) {
+        return;
+      }
+
+      stopTimer();
+      const elapsed = formatProgressElapsed(Date.now() - startedAt);
+      const plain = fitLine(`  ✓  ${label} · ${elapsed}`, uiWidth());
+      process.stderr.write(`\r${progressColor(plain, cliPalette.lime)}\n`);
+      currentMessage = "";
+      startedAt = 0;
+    },
+    clear,
+  };
 }
 
 function renderSourcesPanel(sourceStats) {
   const active = sourceStats.filter((source) => source.entryCount > 0);
   const skipped = sourceStats.length - active.length;
-  const rows = [
-    {
-      left: message("localSources"),
-      right: `${String(sourceStats.length).padStart(2, "0")} / ${String(sourceStats.length).padStart(2, "0")}`,
-      leftColor: cliPalette.muted,
-      rightColor: cliPalette.muted,
-    },
-  ];
+  const rows = active.slice(0, 6).map((source) => ({
+    left: `● ${source.label}`,
+    leftSegments: [
+      { value: "● ", color: cliPalette.lime },
+      { value: source.label, color: cliPalette.ivory },
+    ],
+    right: `${source.fileCount} ${message("files")} · ${source.entryCount} ${rowLabel(source.entryCount)}`,
+    rightColor: cliPalette.muted,
+  }));
 
-  for (const source of sourceStats.slice(0, 2)) {
-    const hasUsage = source.entryCount > 0;
-    const filledBar = hasUsage ? "██████████" : "";
-    const emptyBar = hasUsage ? "░░░░" : "░░░░░░░░░░░░░░";
-    rows.push({
-      left: `${source.label} ${filledBar}${emptyBar}`,
-      leftSegments: [
-        { value: `${source.label} `, color: hasUsage ? cliPalette.ivory : cliPalette.muted },
-        { value: filledBar, color: cliPalette.lime },
-        { value: emptyBar, color: cliPalette.muted },
-      ],
-      right: hasUsage ? message("done") : message("skipped"),
-      leftColor: hasUsage ? cliPalette.ivory : cliPalette.muted,
-      rightColor: hasUsage ? cliPalette.lime : cliPalette.muted,
-    });
+  if (rows.length === 0) {
+    rows.push({ left: message("noLocalUsage"), leftColor: cliPalette.muted });
   }
 
-  rows.push({
-    left: `${active.length} ${message("active")}`,
-    right: `${skipped} ${message("skipped")}`,
-    leftColor: cliPalette.lime,
-    rightColor: cliPalette.muted,
-  });
-  printPanel(rows);
+  rows.push(
+    { divider: true },
+    {
+      left: `${sourceStats.length} ${cliLocale === "zh" ? "个来源已检查" : "sources checked"}`,
+      right: `${active.length} ${message("active")} · ${skipped} ${message("skipped")}`,
+      leftColor: cliPalette.muted,
+      rightColor: active.length ? cliPalette.lime : cliPalette.muted,
+    },
+  );
+  printPanel(rows, { title: message("localSources") });
 }
 
 function renderPrivacyPanel() {
-  printPanel(
-    [{ left: message("privacy"), leftColor: cliPalette.orange }],
-    { accent: true },
-  );
+  console.log("");
+  console.log(`${trueColor("◆", cliPalette.orange)} ${trueColor(message("privacy"), cliPalette.muted)}`);
 }
 
 function logo() {
-  const width = scoreboardWidth();
-  const compact = terminalColumns < 72;
-  const liveLabel = "TOKEN/RANK // LIVE";
-  const liveRank = "01";
-  const liveBand = `${liveLabel}${" ".repeat(Math.max(1, width - displayWidth(liveLabel) - displayWidth(liveRank)))}${liveRank}`;
+  const privacyRows =
+    uiWidth() < 56
+      ? [
+          {
+            left: `● ${message("aggregatesOnly")}`,
+            leftSegments: [
+              { value: "● ", color: cliPalette.lime },
+              { value: message("aggregatesOnly"), color: cliPalette.lime },
+            ],
+          },
+          {
+            left: message("contentStaysLocal"),
+            leftColor: cliPalette.muted,
+          },
+        ]
+      : [
+          {
+            left: `● ${message("aggregatesOnly")}`,
+            leftSegments: [
+              { value: "● ", color: cliPalette.lime },
+              { value: message("aggregatesOnly"), color: cliPalette.lime },
+            ],
+            right: message("contentStaysLocal"),
+            rightColor: cliPalette.muted,
+          },
+        ];
 
-  if (compact) {
-    return trueColor(fitLine(liveBand, width), cliPalette.background, cliPalette.lime);
-  }
-
-  const burn = `  ${message("burnTokens")}`;
-  const rankGap = " ".repeat(Math.max(1, width - displayWidth(burn) - displayWidth(liveRank)));
-  const lines = [
-    trueColor(fitLine(liveBand, width), cliPalette.background, cliPalette.lime),
-    trueColor(fitLine(`  ${message("publicRankSignal")}`, width), cliPalette.muted),
-    "",
-    `${trueColor(burn, cliPalette.ivory)}${rankGap}${trueColor(liveRank, cliPalette.orange)}`,
-    trueColor(fitLine(`  ${message("ascendRanks")}`, width), cliPalette.lime),
-  ];
-
-  return lines.join("\n");
+  return panelLines(
+    [
+      {
+        left: message("collectorSubtitle"),
+        right: `v${clientVersion}`,
+        leftColor: cliPalette.ivory,
+        rightColor: cliPalette.orange,
+      },
+      ...privacyRows,
+    ],
+    { title: "TokenRank" },
+  ).join("\n");
 }
 
 async function printLogo() {
@@ -557,24 +796,14 @@ async function printLogo() {
     return;
   }
 
-  if (useAnimation) {
-    for (const point of ["○", "●"]) {
-      process.stdout.write(`\r${trueColor(`  ${point} ${message("collectorStarting")}`, cliPalette.lime)}`);
-      await sleep(70);
-    }
-    process.stdout.write("\r\x1b[2K");
-  }
-
   console.log(logo());
 }
 
 function printSection(title) {
   console.log("");
-  sectionIndex += 1;
-  const prefix = String(sectionIndex).padStart(2, "0");
 
   if (useColor) {
-    console.log(`${trueColor(`${prefix} /`, cliPalette.lime)} ${trueColor(title.toUpperCase(), cliPalette.ivory)}`);
+    console.log(`${trueColor("●", cliPalette.lime)} ${trueColor(title.toUpperCase(), cliPalette.ivory)}`);
   } else {
     console.log(`== ${title.toUpperCase()} ==`);
   }
@@ -582,10 +811,11 @@ function printSection(title) {
 
 function printStep(label, detail = "") {
   if (useColor) {
-    const width = Math.min(terminalColumns, 104);
-    const prefix = "  ■ ";
-    const body = fitLine(`${label}${detail ? `  ${detail}` : ""}`, Math.max(1, width - [...prefix].length));
-    console.log(`${trueColor(prefix, cliPalette.lime, cliPalette.surface2)}${trueColor(body, cliPalette.ivory, cliPalette.surface2)}`);
+    console.log(
+      `${trueColor("›", cliPalette.lime)} ${trueColor(label, cliPalette.ivory)}${
+        detail ? `  ${trueColor(detail, cliPalette.muted)}` : ""
+      }`,
+    );
   } else {
     console.log(`-> ${label}${detail ? ` ${detail}` : ""}`);
   }
@@ -593,7 +823,7 @@ function printStep(label, detail = "") {
 
 function printSuccess(label, detail = "") {
   if (useColor) {
-    console.log(`${trueColor("OK", cliPalette.lime)} ${trueColor(`${label}${detail ? `  ·  ${detail}` : ""}`, cliPalette.ivory)}`);
+    console.log(`${trueColor("✓", cliPalette.lime)} ${trueColor(`${label}${detail ? `  ·  ${detail}` : ""}`, cliPalette.ivory)}`);
   } else {
     console.log(`OK ${label}${detail ? ` ${detail}` : ""}`);
   }
@@ -603,31 +833,91 @@ function printMuted(label) {
   console.log(trueColor(label, cliPalette.muted));
 }
 
-async function renderUploadGrid(completed, total, entryCount) {
-  if (!useColor) {
-    return;
+function renderToolsPanel() {
+  const columns = uiWidth() >= 64 ? 3 : 2;
+  const innerWidth = Math.max(1, uiWidth() - 4);
+  const gap = 2;
+  const cellWidth = Math.floor((innerWidth - gap * (columns - 1)) / columns);
+  const rows = [];
+
+  for (let rowIndex = 0; rowIndex < Math.ceil(TOOL_KEYS.length / columns); rowIndex += 1) {
+    const leftSegments = [];
+    for (let columnIndex = 0; columnIndex < columns; columnIndex += 1) {
+      const itemIndex = rowIndex * columns + columnIndex;
+      if (columnIndex > 0) {
+        leftSegments.push({ value: " ".repeat(gap), color: cliPalette.line });
+      }
+      if (itemIndex >= TOOL_KEYS.length) {
+        leftSegments.push({ value: " ".repeat(cellWidth), color: cliPalette.ivory });
+        continue;
+      }
+
+      const tool = TOOL_KEYS[itemIndex];
+      leftSegments.push(
+        { value: `${String(itemIndex + 1).padStart(2, "0")} `, color: cliPalette.orange },
+        { value: padCell(tool, Math.max(0, cellWidth - 3)), color: cliPalette.ivory },
+      );
+    }
+    rows.push({ left: "", leftSegments });
   }
 
-  const width = scoreboardWidth();
-  const barWidth = Math.max(10, Math.min(18, width - 28));
-  const filled = Math.round((completed / total) * barWidth);
-  const bar = `${"█".repeat(filled)}${"░".repeat(barWidth - filled)}`;
+  printPanel(rows, { title: `${message("supportedTools")} · ${TOOL_KEYS.length}` });
+}
 
-  if (useAnimation && completed < total) {
-    const line = fitLine(`${message("rankSignal")}  ${bar}  ${completed}/${total}`, width);
-    process.stdout.write(`\r${trueColor(line, cliPalette.lime)}`);
-    return;
+function renderSourceAdaptersPanel() {
+  const rows = [];
+  for (const [index, source] of sourceDefinitions().entries()) {
+    rows.push({
+      left: "",
+      leftSegments: [
+        { value: `${String(index + 1).padStart(2, "0")} `, color: cliPalette.orange },
+        { value: `${padCell(source.label, 18)} `, color: cliPalette.ivory },
+        { value: source.tool, color: cliPalette.lime },
+      ],
+      right: `${source.roots.length} ${message("locations")}`,
+      rightColor: cliPalette.muted,
+    });
+
+    for (const root of source.roots) {
+      const localRoot = root.replace(homedir(), "~");
+      for (const [lineIndex, line] of wrapDisplayLine(localRoot, Math.max(1, uiWidth() - 9)).entries()) {
+        rows.push({
+          left: `${lineIndex === 0 ? "›" : " "} ${line}`,
+          leftColor: cliPalette.muted,
+        });
+      }
+    }
   }
 
-  if (useAnimation) {
-    process.stdout.write("\r\x1b[2K");
+  printPanel(rows, { title: message("localSourceAdapters") });
+}
+
+function helpSectionLines(title, rows) {
+  const width = uiWidth();
+  const lines = [`${trueColor("●", cliPalette.lime)} ${trueColor(title.toUpperCase(), cliPalette.ivory)}`];
+
+  if (width < 64) {
+    for (const [syntax, description] of rows) {
+      lines.push(`  ${trueColor(trimLine(syntax, width - 2), cliPalette.orange)}`);
+      for (const line of wrapDisplayLine(description, width - 4)) {
+        lines.push(`    ${trueColor(line, cliPalette.muted)}`);
+      }
+    }
+    return lines;
   }
 
-  const percent = Math.round((completed / total) * 100);
-  printPanel([
-    { left: message("rankSignal"), right: message("uploadComplete"), leftColor: cliPalette.muted },
-    { left: bar, right: `${percent}% / ${entryCount} ${rowLabel(entryCount)}`, leftColor: cliPalette.lime },
-  ]);
+  const commandWidth = Math.min(
+    28,
+    Math.max(...rows.map(([syntax]) => displayWidth(syntax))),
+  );
+  const descriptionWidth = Math.max(1, width - commandWidth - 4);
+  for (const [syntax, description] of rows) {
+    lines.push(
+      `  ${trueColor(padCell(syntax, commandWidth), cliPalette.orange)}  ${trueColor(trimLine(description, descriptionWidth), cliPalette.muted)}`,
+    );
+  }
+
+  return lines;
 }
 
 async function readCliPackageJson(candidates) {
@@ -645,13 +935,33 @@ async function readCliPackageJson(candidates) {
 }
 
 function usage() {
+  if (useColor) {
+    const help = cliHelp[cliLocale];
+    const usageLines = [
+      `${trueColor("●", cliPalette.lime)} ${trueColor(help.usage.toUpperCase(), cliPalette.ivory)}`,
+      `  ${trueColor("tokenrank <command> [options]", cliPalette.orange)}`,
+      ...wrapDisplayLine(message("usageDescription"), uiWidth() - 4).map(
+        (line) => `  ${trueColor(line, cliPalette.muted)}`,
+      ),
+    ];
+    return [
+      logo(),
+      "",
+      ...usageLines,
+      "",
+      ...helpSectionLines(help.commands, help.commandRows),
+      "",
+      ...helpSectionLines(help.options, help.optionRows),
+    ].join("\n");
+  }
+
   return [
     message("usageTitle"),
     "",
     message("commands"),
     "  tokenrank tools",
     "  tokenrank sources",
-    "  tokenrank status",
+    "  tokenrank status [--json]",
     "  tokenrank doctor",
     "  tokenrank preview [--json] [--tool tool-id] [--since YYYY-MM-DD]",
     "  tokenrank connect <webhook-url>",
@@ -817,6 +1127,18 @@ function serviceStatePath() {
   return path.join(homedir(), ".tokenrank", "service-state.json");
 }
 
+function aggregateStatePath() {
+  return path.join(homedir(), ".tokenrank", "aggregate-state.json");
+}
+
+function pendingSnapshotPath() {
+  return path.join(homedir(), ".tokenrank", "pending-snapshot.json");
+}
+
+function pendingIncrementalPath() {
+  return path.join(homedir(), ".tokenrank", "pending-incremental.json");
+}
+
 function collectorLockPath() {
   return path.join(homedir(), ".tokenrank", "collector.lock");
 }
@@ -834,93 +1156,424 @@ function currentTime() {
 
 function latestScheduleBoundary(now = currentTime()) {
   const boundary = new Date(now);
-  boundary.setMinutes(0, 0, 0);
-  boundary.setHours(now.getHours() >= 12 ? 12 : 0);
+  boundary.setMinutes(collectorScheduleMinute(), 0, 0);
+  if (boundary.getTime() > now.getTime()) {
+    boundary.setHours(boundary.getHours() - 1);
+  }
   return boundary;
 }
 
-async function readServiceState() {
+function utcCalendarDate(value = currentTime()) {
+  return value.toISOString().slice(0, 10);
+}
+
+function statefulEventStartDate(now = currentTime()) {
+  const date = new Date(`${utcCalendarDate(now)}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() - 1);
+  return utcCalendarDate(date);
+}
+
+function collectorScheduleMinute() {
+  const configured = Number(process.env.TOKENRANK_SCHEDULE_MINUTE);
+  if (Number.isInteger(configured) && configured >= 0 && configured <= 59) {
+    return configured;
+  }
+  const digest = createHash("sha256").update(getDeviceId()).digest("hex").slice(0, 8);
+  return Number.parseInt(digest, 16) % 60;
+}
+
+async function readJsonState(file, fallback, validator = null) {
   try {
-    return JSON.parse(await readFile(serviceStatePath(), "utf8"));
+    const value = JSON.parse(await readFile(file, "utf8"));
+    return !validator || validator(value) ? value : fallback;
   } catch (error) {
     if (error?.code === "ENOENT" || error instanceof SyntaxError) {
-      return {};
+      return fallback;
     }
-
     throw error;
   }
 }
 
-async function writeServiceState(state) {
-  const file = serviceStatePath();
+async function writeJsonStateAtomic(file, state) {
   const temporary = `${file}.${process.pid}.tmp`;
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
   await rename(temporary, file);
 }
 
-async function recordSuccessfulLocalUpload(now = currentTime()) {
+function isAggregateState(value) {
+  if (
+    !isPlainObject(value) ||
+    value.accountingVersion !== accountingVersion ||
+    !isDeviceId(value.deviceId) ||
+    !isSha256(value.accountId) ||
+    !isSha256(value.endpointId) ||
+    !isIsoCalendarDate(value.cutoverDate) ||
+    !isIsoCalendarDate(value.lastFullSyncDate) ||
+    value.lastFullSyncDate < value.cutoverDate ||
+    !isIsoTimestamp(value.updatedAt) ||
+    (value.revision !== null &&
+      (!Number.isSafeInteger(value.revision) || value.revision < 0)) ||
+    !isPlainObject(value.aggregates)
+  ) {
+    return false;
+  }
+
+  return Object.entries(value.aggregates).every(([key, row]) =>
+    isStoredAggregateRow(key, row, value.cutoverDate),
+  );
+}
+
+function isPlainObject(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function isDeviceId(value) {
+  return typeof value === "string" && /^tokenrank-[a-f0-9]{32}$/.test(value);
+}
+
+function isSha256(value) {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+}
+
+function isUuid(value) {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+  );
+}
+
+function isIsoTimestamp(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
+}
+
+function isStoredAggregateRow(key, row, cutoverDate) {
+  if (!isPlainObject(row)) {
+    return false;
+  }
+
+  try {
+    const normalized = normalizeEntry(row);
+    return (
+      normalized.date >= cutoverDate &&
+      aggregateKey(normalized) === key &&
+      ["date", "tool", "model", ...TOKEN_COUNT_FIELDS].every(
+        (field) => row[field] === normalized[field],
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isPendingSnapshotState(value) {
+  if (
+    !isPlainObject(value) ||
+    value.accountingVersion !== accountingVersion ||
+    !isDeviceId(value.deviceId) ||
+    !isSha256(value.accountId) ||
+    !isSha256(value.endpointId) ||
+    !isSha256(value.snapshotDigest) ||
+    !isUuid(value.snapshotId) ||
+    !isIsoCalendarDate(value.cutoverDate) ||
+    !Number.isSafeInteger(value.batchSize) ||
+    value.batchSize <= 0 ||
+    value.batchSize > uploadBatchSize ||
+    !Array.isArray(value.entries) ||
+    value.entries.length > value.batchSize * 100 ||
+    !isIsoTimestamp(value.createdAt)
+  ) {
+    return false;
+  }
+
+  const keys = new Set();
+  for (const row of value.entries) {
+    if (!isPlainObject(row)) {
+      return false;
+    }
+    const key = aggregateKey(row);
+    if (
+      keys.has(key) ||
+      !isStoredAggregateRow(key, row, value.cutoverDate)
+    ) {
+      return false;
+    }
+    keys.add(key);
+  }
+
+  return (
+    value.snapshotDigest ===
+    snapshotDigestFor(
+      { deviceId: value.deviceId },
+      {
+        cutoverDate: value.cutoverDate,
+        entries: value.entries,
+        batchSize: value.batchSize,
+      },
+      value.accountId,
+      value.endpointId,
+    )
+  );
+}
+
+function isPendingSnapshotCollection(value) {
+  if (
+    !isPlainObject(value) ||
+    value.accountingVersion !== accountingVersion ||
+    !Array.isArray(value.snapshots) ||
+    value.snapshots.length === 0 ||
+    !value.snapshots.every(isPendingSnapshotState)
+  ) {
+    return false;
+  }
+
+  const snapshotIds = new Set();
+  const endpointDevices = new Set();
+  for (const snapshot of value.snapshots) {
+    const endpointDevice = `${snapshot.endpointId}\0${snapshot.deviceId}`;
+    if (snapshotIds.has(snapshot.snapshotId) || endpointDevices.has(endpointDevice)) {
+      return false;
+    }
+    snapshotIds.add(snapshot.snapshotId);
+    endpointDevices.add(endpointDevice);
+  }
+  return true;
+}
+
+function isPendingIncrementalState(value) {
+  if (
+    !isPlainObject(value) ||
+    value.accountingVersion !== accountingVersion ||
+    !isDeviceId(value.deviceId) ||
+    !isSha256(value.accountId) ||
+    !isSha256(value.endpointId) ||
+    !isIsoCalendarDate(value.cutoverDate) ||
+    !isSha256(value.digest) ||
+    !Array.isArray(value.entries) ||
+    value.entries.length === 0 ||
+    value.entries.length > uploadBatchSize * 100 ||
+    !isIsoTimestamp(value.createdAt)
+  ) {
+    return false;
+  }
+
+  const keys = new Set();
+  for (const row of value.entries) {
+    if (!isPlainObject(row)) {
+      return false;
+    }
+    const key = aggregateKey(row);
+    if (keys.has(key) || !isStoredAggregateRow(key, row, value.cutoverDate)) {
+      return false;
+    }
+    keys.add(key);
+  }
+
+  return value.digest === incrementalDigestFor(value);
+}
+
+async function readAggregateState() {
+  return readJsonState(aggregateStatePath(), null, isAggregateState);
+}
+
+async function writeAggregateState(state) {
+  return writeJsonStateAtomic(aggregateStatePath(), state);
+}
+
+async function readPendingSnapshots() {
+  const value = await readJsonState(
+    pendingSnapshotPath(),
+    null,
+    (candidate) =>
+      isPendingSnapshotState(candidate) || isPendingSnapshotCollection(candidate),
+  );
+  if (!value) {
+    return [];
+  }
+  return isPendingSnapshotState(value) ? [value] : value.snapshots;
+}
+
+async function writePendingSnapshots(snapshots) {
+  if (snapshots.length === 0) {
+    await rm(pendingSnapshotPath(), { force: true });
+    return;
+  }
+  await writeJsonStateAtomic(
+    pendingSnapshotPath(),
+    snapshots.length === 1
+      ? snapshots[0]
+      : { accountingVersion, snapshots },
+  );
+}
+
+async function upsertPendingSnapshot(state) {
+  const snapshots = (await readPendingSnapshots()).filter(
+    (snapshot) =>
+      snapshot.endpointId !== state.endpointId || snapshot.deviceId !== state.deviceId,
+  );
+  snapshots.push(state);
+  await writePendingSnapshots(snapshots);
+}
+
+async function removePendingSnapshots(predicate) {
+  const snapshots = await readPendingSnapshots();
+  await writePendingSnapshots(snapshots.filter((snapshot) => !predicate(snapshot)));
+}
+
+async function readPendingIncremental() {
+  return readJsonState(
+    pendingIncrementalPath(),
+    null,
+    isPendingIncrementalState,
+  );
+}
+
+async function writePendingIncremental(state) {
+  await writeJsonStateAtomic(pendingIncrementalPath(), state);
+}
+
+async function clearPendingIncremental() {
+  await rm(pendingIncrementalPath(), { force: true });
+}
+
+async function readServiceState() {
+  return readJsonState(serviceStatePath(), {});
+}
+
+async function writeServiceState(state) {
+  return writeJsonStateAtomic(serviceStatePath(), state);
+}
+
+async function recordStartedLocalUpload(accountId, endpointId, now = currentTime()) {
+  const state = await readServiceState();
+  await writeServiceState({
+    ...state,
+    lastAttemptAt: now.toISOString(),
+    lastAttemptAccountId: accountId,
+    lastAttemptEndpointId: endpointId,
+    lastErrorCode: "UPLOAD_IN_PROGRESS",
+  });
+}
+
+async function recordSuccessfulLocalUpload(accountId, endpointId, now = currentTime()) {
   const state = await readServiceState();
   await writeServiceState({
     ...state,
     lastAttemptAt: now.toISOString(),
     lastSuccessfulAt: now.toISOString(),
+    lastSuccessfulAccountId: accountId,
+    lastSuccessfulEndpointId: endpointId,
     lastScheduledBoundary: latestScheduleBoundary(now).toISOString(),
     lastErrorCode: null,
   });
 }
 
-async function collectorLockIsStale(file) {
-  try {
-    const lock = JSON.parse(await readFile(file, "utf8"));
-    const createdAt = new Date(lock.createdAt).getTime();
-    const expired = !Number.isFinite(createdAt) || currentTime().getTime() - createdAt > 2 * 60 * 60 * 1000;
+async function recordFailedLocalUpload(now = currentTime()) {
+  const state = await readServiceState();
+  await writeServiceState({
+    ...state,
+    lastAttemptAt: now.toISOString(),
+    lastErrorCode: "UPLOAD_FAILED",
+  });
+}
 
-    if (expired) {
-      return true;
-    }
+async function inspectCollectorLock(file) {
+  let raw = null;
+  try {
+    raw = await readFile(file, "utf8");
+    const lock = JSON.parse(raw);
 
     if (!Number.isSafeInteger(lock.pid) || lock.pid <= 0) {
-      return true;
+      return { stale: true, raw };
     }
 
     try {
       process.kill(lock.pid, 0);
-      return false;
+      return { stale: false, raw };
     } catch (error) {
-      return error?.code === "ESRCH";
+      return { stale: error?.code === "ESRCH", raw };
     }
   } catch {
-    return true;
+    return { stale: true, raw };
   }
 }
 
-async function withCollectorLock(operation) {
+async function takeOverStaleCollectorLock(file, observed) {
+  const tombstone = `${file}.stale.${randomUUID()}`;
+  try {
+    await rename(file, tombstone);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+
+  let movedRaw = null;
+  try {
+    movedRaw = await readFile(tombstone, "utf8");
+  } catch {
+    // A malformed stale lock is still safe to quarantine.
+  }
+  if (observed.raw !== null && movedRaw !== observed.raw) {
+    try {
+      if (!(await pathExists(file))) {
+        await rename(tombstone, file);
+      }
+    } catch {
+      // Keep the mismatched owner quarantined instead of deleting it.
+    }
+    return false;
+  }
+  await rm(tombstone, { force: true });
+  return true;
+}
+
+async function withCollectorLock(operation, options = {}) {
   const file = collectorLockPath();
+  const nonce = randomUUID();
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
 
-  try {
-    await writeFile(file, `${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })}\n`, {
-      flag: "wx",
-      mode: 0o600,
-    });
-  } catch (error) {
-    if (error?.code === "EEXIST") {
-      if (await collectorLockIsStale(file)) {
-        await rm(file, { force: true });
-        return withCollectorLock(operation);
+  for (;;) {
+    try {
+      await writeFile(
+        file,
+        `${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString(), nonce })}\n`,
+        { flag: "wx", mode: 0o600 },
+      );
+      break;
+    } catch (error) {
+      if (error?.code === "EEXIST") {
+        const observed = await inspectCollectorLock(file);
+        if (observed.stale && (await takeOverStaleCollectorLock(file, observed))) {
+          continue;
+        }
+
+        if (options.failWhenLocked) {
+          throw new Error(message("collectorLocked"));
+        }
+        return { skipped: true, reason: "locked" };
       }
 
-      return { skipped: true, reason: "locked" };
+      throw error;
     }
-
-    throw error;
   }
 
   try {
     return await operation();
   } finally {
-    await rm(file, { force: true });
+    try {
+      const current = JSON.parse(await readFile(file, "utf8"));
+      if (current.nonce === nonce) {
+        await rm(file, { force: true });
+      }
+    } catch {
+      // A missing or replaced lock is never deleted blindly.
+    }
   }
 }
 
@@ -943,7 +1596,7 @@ async function writeConfig(config) {
 
 async function removeConfig() {
   await rm(configPath(), { force: true });
-  console.log(message("removedWebhook"));
+  printSuccess(message("removedWebhook"));
 }
 
 function requireWebhookUrl(value) {
@@ -1105,13 +1758,6 @@ function normalizeEntry(rawEntry) {
   };
 }
 
-function localCalendarDate(parsed) {
-  const year = parsed.getFullYear();
-  const month = String(parsed.getMonth() + 1).padStart(2, "0");
-  const day = String(parsed.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
 function dateFromValue(value) {
   if (typeof value === "string") {
     if (isIsoCalendarDate(value)) {
@@ -1121,7 +1767,7 @@ function dateFromValue(value) {
     const parsed = new Date(value);
 
     if (Number.isFinite(parsed.getTime())) {
-      return localCalendarDate(parsed);
+      return utcCalendarDate(parsed);
     }
   }
 
@@ -1130,7 +1776,7 @@ function dateFromValue(value) {
     const parsed = new Date(millis);
 
     if (Number.isFinite(parsed.getTime())) {
-      return localCalendarDate(parsed);
+      return utcCalendarDate(parsed);
     }
   }
 
@@ -1138,7 +1784,7 @@ function dateFromValue(value) {
 }
 
 function pickDate(record, fallbackDate) {
-  for (const key of ["date", "timestamp", "createdAt", "created_at", "startedAt", "started_at", "current_date"]) {
+  for (const key of ["timestamp", "createdAt", "created_at", "startedAt", "started_at", "date", "current_date"]) {
     const date = dateFromValue(record[key]);
 
     if (date) {
@@ -1337,7 +1983,7 @@ function dateFromUnixNano(value, fallbackDate) {
   try {
     const milliseconds = Number(BigInt(String(value)) / 1_000_000n);
     const parsed = new Date(milliseconds);
-    return Number.isFinite(parsed.getTime()) ? localCalendarDate(parsed) : fallbackDate;
+    return Number.isFinite(parsed.getTime()) ? utcCalendarDate(parsed) : fallbackDate;
   } catch {
     return fallbackDate;
   }
@@ -1469,7 +2115,13 @@ function isScannableFile(file, options = {}) {
   );
 }
 
-async function collectFiles(root, maxFiles = 1000, options = {}) {
+function sourceFileLimit() {
+  const configured = Number(process.env.TOKENRANK_MAX_SOURCE_FILES ?? 100_000);
+  return Number.isSafeInteger(configured) && configured > 0 ? configured : 100_000;
+}
+
+async function collectFiles(root, maxFiles = sourceFileLimit(), options = {}) {
+  const health = options.health ?? {};
   const rootStat = await pathExists(root);
 
   if (!rootStat) {
@@ -1477,33 +2129,43 @@ async function collectFiles(root, maxFiles = 1000, options = {}) {
   }
 
   if (rootStat.isFile()) {
-    return isScannableFile(root, options) ? [root] : [];
+    return isScannableFile(root, options) && (!options.includeFile || options.includeFile(root))
+      ? [root]
+      : [];
   }
 
   const files = [];
   const queue = [root];
+  let queueIndex = 0;
 
-  while (queue.length && files.length < maxFiles) {
-    const current = queue.shift();
+  while (queueIndex < queue.length) {
+    const current = queue[queueIndex];
+    queueIndex += 1;
     let entries;
 
     try {
       entries = await readdir(current, { withFileTypes: true });
     } catch {
+      health.readErrors = (health.readErrors ?? 0) + 1;
       continue;
     }
+    entries.sort((left, right) => left.name.localeCompare(right.name));
 
     for (const entry of entries) {
       const fullPath = path.join(current, entry.name);
 
       if (entry.isDirectory()) {
         queue.push(fullPath);
-      } else if (entry.isFile() && isScannableFile(fullPath, options)) {
-        files.push(fullPath);
-
+      } else if (
+        entry.isFile() &&
+        isScannableFile(fullPath, options) &&
+        (!options.includeFile || options.includeFile(fullPath))
+      ) {
         if (files.length >= maxFiles) {
-          break;
+          health.truncated = true;
+          return files;
         }
+        files.push(fullPath);
       }
     }
   }
@@ -1525,7 +2187,7 @@ function configuredByteLimit(name, fallback) {
   return Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
-async function* readBoundedLines(file) {
+async function* readBoundedLines(file, health = {}) {
   const maxLineBytes = configuredByteLimit(
     "TOKENRANK_MAX_JSONL_LINE_BYTES",
     DEFAULT_MAX_JSONL_LINE_BYTES,
@@ -1550,6 +2212,7 @@ async function* readBoundedLines(file) {
           parts = [];
           bufferedBytes = 0;
           discardUntilNewline = true;
+          health.skippedOversize = (health.skippedOversize ?? 0) + 1;
         } else {
           parts.push(part);
           bufferedBytes += partBytes;
@@ -1584,7 +2247,7 @@ async function* readUsageFile(file, tool, source = { id: `${tool}-local`, priori
   let recordIndex = 0;
 
   if (file.endsWith(".db") || file.endsWith(".sqlite")) {
-    for (const entry of await readSqliteUsage(file, tool, fallbackDate)) {
+    for (const entry of await readSqliteUsage(file, tool, fallbackDate, source.health)) {
       yield sourceEntry(entry, file, source, recordIndex);
       recordIndex += 1;
     }
@@ -1594,7 +2257,7 @@ async function* readUsageFile(file, tool, source = { id: `${tool}-local`, priori
   if (file.endsWith(".jsonl")) {
     let context = { date: fallbackDate, model: null };
 
-    for await (const line of readBoundedLines(file)) {
+    for await (const line of readBoundedLines(file, source.health)) {
       const trimmed = line.trim();
 
       if (!trimmed) {
@@ -1628,6 +2291,9 @@ async function* readUsageFile(file, tool, source = { id: `${tool}-local`, priori
   );
 
   if (fileStat.size > maxDocumentBytes) {
+    if (source.health) {
+      source.health.skippedOversize = (source.health.skippedOversize ?? 0) + 1;
+    }
     return;
   }
 
@@ -1737,7 +2403,7 @@ function sumSqlExpr(columns, names) {
   return existing.map((name) => `coalesce(${quoteSqlIdent(name)}, 0)`).join(" + ");
 }
 
-async function readSqliteUsage(file, tool, fallbackDate) {
+async function readSqliteUsage(file, tool, fallbackDate, health = {}) {
   const tables = await sqliteJson(
     file,
     "select name from sqlite_master where type = 'table' and name not like 'sqlite_%'",
@@ -1796,12 +2462,12 @@ async function readSqliteUsage(file, tool, fallbackDate) {
     }
 
     const dateColumn = firstColumn(columns, [
-      "date",
       "timestamp",
       "createdAt",
       "created_at",
       "startedAt",
       "started_at",
+      "date",
     ]);
     const modelColumn = firstColumn(columns, ["model", "modelId", "model_id", "modelName", "model_name"]);
     const dateSelect = dateColumn ? quoteSqlIdent(dateColumn) : "null";
@@ -1819,11 +2485,14 @@ async function readSqliteUsage(file, tool, fallbackDate) {
         `${cacheWriteExpr} as cacheWrite`,
         `from ${quoteSqlIdent(tableName)}`,
         `where (${tokenExpr}) > 0`,
-        "limit 10000",
+        "limit 10001",
       ].join(" "),
     );
 
-    for (const row of rows) {
+    if (rows.length > 10000) {
+      health.truncated = true;
+    }
+    for (const row of rows.slice(0, 10000)) {
       const date = pickDate(row, fallbackDate);
       const model = normalizeModel(pickModel(row, fallbackModel), tool);
       const input = readNumber(row, ["input"]);
@@ -1894,7 +2563,7 @@ function createUsageAccumulator() {
         total: 0,
       };
 
-    for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"]) {
+    for (const key of TOKEN_COUNT_FIELDS) {
       const next = current[key] + direction * entry[key];
 
       if (!Number.isSafeInteger(next) || next < 0) {
@@ -1990,85 +2659,176 @@ function getScanOptions(args) {
   return { tool, since };
 }
 
+async function collectSourceFiles(source, options = {}) {
+  const files = [];
+
+  for (const root of source.roots) {
+    const rootFiles = await collectFiles(root, sourceFileLimit(), {
+      includeLogs: source.includeLogs,
+      includeFile: source.includeFile,
+      health: options.health,
+    });
+    files.push(...rootFiles);
+  }
+
+  return files.sort((left, right) => left.localeCompare(right));
+}
+
 async function scanLocalUsage(args, options = {}) {
-  const { tool, since } = getScanOptions(args);
+  const scanOptions = getScanOptions(args);
+  const tool = scanOptions.tool;
+  const since = options.sinceOverride ?? scanOptions.since;
+  const health = options.health ?? { truncated: false, readErrors: 0, skippedOversize: 0 };
   const accumulator = createUsageAccumulator();
-  const progress = Boolean(options.progress);
+  const showProgress = Boolean(options.progress);
+  const showPanels = Boolean(options.panels);
   const sources = sourceDefinitions().filter((source) => !tool || source.tool === tool);
   const sourceStats = [];
+  const discoveredSources = [];
+  const reporter = createProgressReporter();
+  let discoveredFileCount = 0;
+  let scannedFileCount = 0;
+  let scannedRowCount = 0;
 
-  if (progress && !useColor) {
+  if (showPanels && !useColor) {
     printSection(message("scanLocalUsage"));
     printMuted(
       `${message("scope", { scope: tool || message("allTools") })}${since ? ` · ${since}` : ""}`,
     );
   }
 
-  for (const [sourceIndex, source] of sources.entries()) {
-    let sourceFileCount = 0;
-    let sourceEntryCount = 0;
+  try {
+    if (showProgress && sources.length > 0) {
+      reporter.start(
+        message("discoveringSourceProgress", {
+          source: sources[0].label,
+          current: 1,
+          total: sources.length,
+          files: 0,
+        }),
+      );
+    }
 
-    if (progress) {
-      if (useColor) {
-        renderSourceProgress(source.label, sourceIndex + 1, sources.length);
-      } else {
-        printStep(message("scanning", { source: source.label }), source.tool);
+    for (const [sourceIndex, source] of sources.entries()) {
+      const files = await collectSourceFiles(source, {
+        health,
+      });
+      discoveredFileCount += files.length;
+      discoveredSources.push({ source, files });
+      if (showProgress) {
+        reporter.update(
+          message("discoveringSourceProgress", {
+            source: source.label,
+            current: sourceIndex + 1,
+            total: sources.length,
+            files: discoveredFileCount,
+          }),
+        );
       }
     }
 
-    for (const root of source.roots) {
-      const files = (await collectFiles(root, 1000, { includeLogs: source.includeLogs })).filter(
-        (file) => !source.includeFile || source.includeFile(file),
-      );
-      sourceFileCount += files.length;
+    for (const [sourceIndex, { source, files }] of discoveredSources.entries()) {
+      let sourceEntryCount = 0;
+
+      if (showPanels && !useColor) {
+        printStep(message("scanning", { source: source.label }), source.tool);
+      }
 
       for (const file of files) {
+        if (showProgress) {
+          reporter.update(
+            message("scanningSourceProgress", {
+              source: source.label,
+              current: sourceIndex + 1,
+              total: sources.length,
+              fileCurrent: scannedFileCount,
+              fileTotal: discoveredFileCount,
+              rows: scannedRowCount,
+            }),
+          );
+        }
+
         for await (const entry of readUsageFile(file, source.tool, {
           id: source.id ?? `${source.tool}-local`,
           priority: source.priority ?? 100,
+          health,
         })) {
           sourceEntryCount += 1;
+          scannedRowCount += 1;
 
           if (!since || entry.date >= since) {
             accumulator.add(entry);
           }
+
+          if (showProgress && scannedRowCount % 100 === 0) {
+            reporter.update(
+              message("scanningSourceProgress", {
+                source: source.label,
+                current: sourceIndex + 1,
+                total: sources.length,
+                fileCurrent: scannedFileCount,
+                fileTotal: discoveredFileCount,
+                rows: scannedRowCount,
+              }),
+            );
+          }
         }
+
+        scannedFileCount += 1;
+      }
+
+      sourceStats.push({
+        label: source.label,
+        tool: source.tool,
+        fileCount: files.length,
+        entryCount: sourceEntryCount,
+      });
+
+      if (showPanels && !useColor) {
+        printMuted(
+          `   ${source.tool}: ${files.length} ${message("files")}, ${sourceEntryCount} ${rowLabel(sourceEntryCount)}`,
+        );
       }
     }
 
-    sourceStats.push({
-      label: source.label,
-      tool: source.tool,
-      fileCount: sourceFileCount,
-      entryCount: sourceEntryCount,
-    });
+    const aggregatedEntries = accumulator.values();
 
-    if (progress && !useColor) {
-      printMuted(
-        `   ${source.tool}: ${sourceFileCount} ${message("files")}, ${sourceEntryCount} ${rowLabel(sourceEntryCount)}`,
+    if (showProgress) {
+      reporter.finish(
+        message("scanProgressSummary", {
+          sources: sources.length,
+          files: discoveredFileCount,
+          rows: scannedRowCount,
+          aggregates: aggregatedEntries.length,
+        }),
       );
     }
-  }
 
-  const aggregatedEntries = accumulator.values();
-
-  if (progress) {
-    if (useColor) {
-      clearSourceProgress();
-      renderSourcesPanel(sourceStats);
-      renderPrivacyPanel();
-    } else {
-      printSuccess(
-        message("scanComplete"),
-        `${accumulator.filteredCount} ${rowLabel(accumulator.filteredCount)} -> ${accumulator.uniqueCount} ${message("uniqueRows")} -> ${aggregatedEntries.length} ${message("aggregateRows")}`,
-      );
+    if (showPanels) {
+      if (useColor) {
+        renderSourcesPanel(sourceStats);
+        renderPrivacyPanel();
+      } else {
+        printSuccess(
+          message("scanComplete"),
+          `${accumulator.filteredCount} ${rowLabel(accumulator.filteredCount)} -> ${accumulator.uniqueCount} ${message("uniqueRows")} -> ${aggregatedEntries.length} ${message("aggregateRows")}`,
+        );
+      }
     }
-  }
 
-  return aggregatedEntries;
+    return options.returnMeta ? { entries: aggregatedEntries, health } : aggregatedEntries;
+  } catch (error) {
+    reporter.clear();
+    throw error;
+  }
 }
 
 function printSources() {
+  if (useColor) {
+    renderSourceAdaptersPanel();
+    return;
+  }
+
   for (const source of sourceDefinitions()) {
     const roots = source.roots.map((root) => root.replace(homedir(), "~")).join(", ");
     console.log(`${source.tool}\t${source.label}\t${roots}`);
@@ -2092,12 +2852,235 @@ function buildUploadPayload(raw) {
   const entries = getEntriesInput(raw).map(normalizeEntry);
 
   return {
+    accountingVersion,
     deviceId: typeof source.deviceId === "string" && source.deviceId.trim() ? source.deviceId.trim() : getDeviceId(),
     clientVersion: typeof source.clientVersion === "string" && source.clientVersion.trim() ? source.clientVersion.trim() : clientVersion,
     timezone: typeof source.timezone === "string" && source.timezone.trim() ? source.timezone.trim() : getTimezone(),
-    generatedAt: typeof source.generatedAt === "string" && source.generatedAt.trim() ? source.generatedAt.trim() : new Date().toISOString(),
+    generatedAt: typeof source.generatedAt === "string" && source.generatedAt.trim() ? source.generatedAt.trim() : currentTime().toISOString(),
     entries,
   };
+}
+
+function aggregateKey(entry) {
+  return JSON.stringify([entry.date, entry.tool, entry.model]);
+}
+
+function snapshotDigestFor(payload, plan, accountId, endpointId) {
+  return createHash("sha256")
+    .update(`${accountingVersion}\0${payload.deviceId}\0${accountId}\0${endpointId}\0`)
+    .update(`${plan.cutoverDate}\0${plan.batchSize ?? uploadBatchSize}\0`)
+    .update(JSON.stringify(plan.entries))
+    .digest("hex");
+}
+
+function incrementalDigestFor(state) {
+  return createHash("sha256")
+    .update(
+      `${accountingVersion}\0${state.deviceId}\0${state.accountId}\0${state.endpointId}\0`,
+    )
+    .update(`${state.cutoverDate}\0${JSON.stringify(state.entries)}`)
+    .digest("hex");
+}
+
+function mergeHighWaterEntries(...groups) {
+  const rows = new Map();
+  for (const group of groups) {
+    for (const rawEntry of group ?? []) {
+      const entry = normalizeEntry(rawEntry);
+      const key = aggregateKey(entry);
+      const previous = rows.get(key);
+      if (!previous || aggregateIsNonDecreasing(entry, previous)) {
+        rows.set(key, entry);
+        continue;
+      }
+      if (aggregateIsNonDecreasing(previous, entry)) {
+        continue;
+      }
+      const input = Math.max(previous.input, entry.input);
+      const output = Math.max(previous.output, entry.output);
+      const cacheRead = Math.max(previous.cacheRead, entry.cacheRead);
+      const cacheWrite = Math.max(previous.cacheWrite, entry.cacheWrite);
+      rows.set(key, {
+        ...entry,
+        input,
+        output,
+        cacheRead,
+        cacheWrite,
+        total: canonicalTotalFor(entry.tool, input, output, cacheRead, cacheWrite),
+      });
+    }
+  }
+  return sortedAggregateRows(rows);
+}
+
+function aggregateStateFromEntries(entries) {
+  return Object.fromEntries(entries.map((entry) => [aggregateKey(entry), entry]));
+}
+
+async function stabilizeFullSnapshotPlan(
+  payload,
+  plan,
+  accountId,
+  endpointId,
+  pending = undefined,
+) {
+  if (pending === undefined) {
+    pending = (await readPendingSnapshots()).find(
+      (snapshot) =>
+        snapshot.accountId === accountId &&
+        snapshot.endpointId === endpointId &&
+        snapshot.deviceId === payload.deviceId,
+    );
+  }
+  if (
+    pending?.endpointId === endpointId &&
+    pending.deviceId === payload.deviceId
+  ) {
+    return {
+      ...plan,
+      entries: pending.entries,
+      aggregates: aggregateStateFromEntries(pending.entries),
+      snapshotId: pending.snapshotId,
+      cutoverDate: pending.cutoverDate,
+      batchSize: pending.batchSize,
+    };
+  }
+
+  const batchSize = uploadBatchSize;
+  const stablePlan = { ...plan, batchSize };
+  const snapshotDigest = snapshotDigestFor(payload, stablePlan, accountId, endpointId);
+  const snapshotId = randomUUID();
+  await upsertPendingSnapshot({
+    accountingVersion,
+    deviceId: payload.deviceId,
+    accountId,
+    endpointId,
+    snapshotDigest,
+    snapshotId,
+    cutoverDate: stablePlan.cutoverDate,
+    batchSize,
+    entries: stablePlan.entries,
+    createdAt: currentTime().toISOString(),
+  });
+  return { ...stablePlan, snapshotId };
+}
+
+function aggregateIsNonDecreasing(next, previous) {
+  return TOKEN_COUNT_FIELDS.every((field) => next[field] >= previous[field]);
+}
+
+function aggregateCountsEqual(next, previous) {
+  return TOKEN_COUNT_FIELDS.every((field) => next[field] === previous[field]);
+}
+
+function reconciliationDate(cutoverDate, now = currentTime()) {
+  return cutoverDate > utcCalendarDate(now) ? cutoverDate : utcCalendarDate(now);
+}
+
+function planStatefulSync(
+  payload,
+  previousState,
+  accountId,
+  endpointId,
+  now = currentTime(),
+  forcedCutoverDate = null,
+) {
+  const deviceStateMatches =
+    previousState?.deviceId === payload.deviceId && previousState.accountId === accountId;
+  const endpointStateMatches = deviceStateMatches && previousState.endpointId === endpointId;
+  const cutoverDate =
+    forcedCutoverDate ?? (deviceStateMatches ? previousState.cutoverDate : utcCalendarDate(now));
+  const aggregates = deviceStateMatches
+    ? Object.fromEntries(
+        Object.entries(previousState.aggregates).filter(([, entry]) => entry.date >= cutoverDate),
+      )
+    : {};
+  const changedEntries = [];
+
+  for (const entry of payload.entries) {
+    if (entry.date < cutoverDate) {
+      continue;
+    }
+    const key = aggregateKey(entry);
+    const previous = aggregates[key];
+    if (
+      !previous ||
+      (aggregateIsNonDecreasing(entry, previous) && !aggregateCountsEqual(entry, previous))
+    ) {
+      aggregates[key] = entry;
+      changedEntries.push(entry);
+    }
+  }
+
+  const highWaterEntries = sortedAggregateRows(new Map(Object.entries(aggregates)));
+  const full =
+    forcedCutoverDate !== null ||
+    !deviceStateMatches ||
+    !endpointStateMatches ||
+    previousState.lastFullSyncDate !== reconciliationDate(cutoverDate, now);
+
+  if (full) {
+    return {
+      syncMode: "full",
+      entries: highWaterEntries,
+      aggregates,
+      snapshotId: null,
+      cutoverDate,
+    };
+  }
+
+  return {
+    syncMode: "incremental",
+    entries: changedEntries,
+    aggregates,
+    snapshotId: null,
+    cutoverDate,
+  };
+}
+
+function buildProtocolBatches(payload, plan) {
+  const base = {
+    accountingVersion,
+    deviceId: payload.deviceId,
+    clientVersion: payload.clientVersion,
+    timezone: payload.timezone,
+    generatedAt: payload.generatedAt,
+    syncMode: plan.syncMode,
+  };
+
+  if (plan.syncMode === "full") {
+    const batchSize = plan.batchSize ?? uploadBatchSize;
+    const batchCount = Math.max(1, Math.ceil(plan.entries.length / batchSize));
+    if (batchCount > 100) {
+      throw new Error(message("snapshotTooLarge"));
+    }
+    return Array.from({ length: batchCount }, (_, batchIndex) => {
+      const entries = plan.entries.slice(
+        batchIndex * batchSize,
+        (batchIndex + 1) * batchSize,
+      );
+      return {
+        ...base,
+        snapshotId: plan.snapshotId,
+        cutoverDate: plan.cutoverDate,
+        batchIndex,
+        batchCount,
+        batchHash: createHash("sha256").update(JSON.stringify(entries)).digest("hex"),
+        entries,
+      };
+    });
+  }
+
+  return Array.from(
+    { length: Math.ceil(plan.entries.length / uploadBatchSize) },
+    (_, batchIndex) => ({
+      ...base,
+      entries: plan.entries.slice(
+        batchIndex * uploadBatchSize,
+        (batchIndex + 1) * uploadBatchSize,
+      ),
+    }),
+  );
 }
 
 function firstProxyValue(names) {
@@ -2168,7 +3151,7 @@ function parseMacSystemProxy(output, targetUrl) {
   return normalizeProxyUrl(`http://${entries[`${prefix}Proxy`]}:${entries[`${prefix}Port`]}`);
 }
 
-async function systemProxyFor(targetUrl) {
+async function systemProxyFor(targetUrl, signal) {
   if (process.env.TOKENRANK_TEST_SYSTEM_PROXY) {
     return normalizeProxyUrl(process.env.TOKENRANK_TEST_SYSTEM_PROXY);
   }
@@ -2178,36 +3161,59 @@ async function systemProxyFor(targetUrl) {
   }
 
   try {
-    const { stdout } = await execFileAsync("scutil", ["--proxy"]);
+    const { stdout } = await execFileAsync("scutil", ["--proxy"], { signal });
     return parseMacSystemProxy(stdout, targetUrl);
   } catch {
     return null;
   }
 }
 
-async function proxyFor(targetUrl) {
+async function proxyFor(targetUrl, signal) {
   if (shouldBypassProxy(targetUrl.hostname)) {
     return null;
   }
 
-  return explicitProxyFor(targetUrl) ?? (await systemProxyFor(targetUrl));
+  return explicitProxyFor(targetUrl) ?? (await systemProxyFor(targetUrl, signal));
 }
 
 function responseFromNode(res) {
   return new Promise((resolve, reject) => {
     const chunks = [];
+    let settled = false;
+    const fail = (error) => {
+      if (!settled) {
+        settled = true;
+        reject(error);
+      }
+    };
 
     res.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
     res.on("end", () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
       const status = res.statusCode ?? 0;
 
       resolve({
         ok: status >= 200 && status < 300,
         status,
+        headers: {
+          get(name) {
+            const value = res.headers[String(name).toLowerCase()];
+            return Array.isArray(value) ? value.join(", ") : value ?? null;
+          },
+        },
         text: async () => Buffer.concat(chunks).toString("utf8"),
       });
     });
-    res.on("error", reject);
+    res.on("aborted", () => fail(new Error(message("proxyResponseInvalid"))));
+    res.on("close", () => {
+      if (!res.complete) {
+        fail(new Error(message("proxyResponseInvalid")));
+      }
+    });
+    res.on("error", fail);
   });
 }
 
@@ -2253,6 +3259,14 @@ function responseFromRawHttp(buffer) {
 
   const headerText = buffer.subarray(0, headerEnd).toString("ascii");
   const status = Number(headerText.match(/^HTTP\/\d(?:\.\d)?\s+(\d+)/)?.[1] ?? 0);
+  const headers = Object.fromEntries(
+    headerText
+      .split("\r\n")
+      .slice(1)
+      .map((line) => line.match(/^([^:]+):\s*(.*)$/))
+      .filter(Boolean)
+      .map((match) => [match[1].toLowerCase(), match[2]]),
+  );
   const isChunked = /\r\ntransfer-encoding:\s*chunked\b/i.test(headerText);
   const body = buffer.subarray(headerEnd + 4);
   const responseBody = isChunked ? decodeChunkedBody(body) : body;
@@ -2260,18 +3274,35 @@ function responseFromRawHttp(buffer) {
   return {
     ok: status >= 200 && status < 300,
     status,
+    headers: { get: (name) => headers[String(name).toLowerCase()] ?? null },
     text: async () => responseBody.toString("utf8"),
   };
 }
 
-function requestViaHttpProxy(targetUrl, proxyUrl, body, headers) {
+function requestViaHttpProxy(targetUrl, proxyUrl, { method, body, headers, signal }) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal?.removeEventListener("abort", abortRequest);
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    const fail = (error) => finish(reject, error);
+    const abortRequest = () => {
+      const error = signal?.reason instanceof Error
+        ? signal.reason
+        : new Error(message("requestTimedOut"));
+      request.destroy(error);
+      fail(error);
+    };
     const request = (proxyUrl.protocol === "https:" ? httpsRequest : httpRequest)(
       {
         protocol: proxyUrl.protocol,
         hostname: proxyUrl.hostname,
         port: proxyPort(proxyUrl),
-        method: "POST",
+        method,
         path: targetUrl.href,
         headers: {
           ...headers,
@@ -2279,18 +3310,48 @@ function requestViaHttpProxy(targetUrl, proxyUrl, body, headers) {
         },
       },
       (res) => {
-        responseFromNode(res).then(resolve, reject);
+        responseFromNode(res).then(
+          (response) => finish(resolve, response),
+          fail,
+        );
       },
     );
 
-    request.on("error", reject);
-    request.end(body);
+    if (signal?.aborted) {
+      abortRequest();
+      return;
+    }
+    signal?.addEventListener("abort", abortRequest, { once: true });
+    request.on("error", fail);
+    request.end(body || undefined);
   });
 }
 
-function requestViaHttpsProxy(targetUrl, proxyUrl, body) {
+function requestViaHttpsProxy(targetUrl, proxyUrl, { method, body, headers, signal }) {
   return new Promise((resolve, reject) => {
     const targetPort = Number(targetUrl.port || 443);
+    let tunnelSocket = null;
+    let tlsSocket = null;
+    let settled = false;
+    const cleanup = () => signal?.removeEventListener("abort", abortRequest);
+    const finish = (callback, value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    const fail = (error) => finish(reject, error);
+    const abortRequest = () => {
+      const error = signal?.reason instanceof Error
+        ? signal.reason
+        : new Error(message("requestTimedOut"));
+      proxyRequest.destroy(error);
+      tunnelSocket?.destroy(error);
+      tlsSocket?.destroy(error);
+      fail(error);
+    };
     const proxyRequest = (proxyUrl.protocol === "https:" ? httpsRequest : httpRequest)({
       protocol: proxyUrl.protocol,
       hostname: proxyUrl.hostname,
@@ -2300,85 +3361,96 @@ function requestViaHttpsProxy(targetUrl, proxyUrl, body) {
       headers: {
         host: `${targetUrl.hostname}:${targetPort}`,
       },
+      signal,
     });
 
+    if (signal?.aborted) {
+      abortRequest();
+      return;
+    }
+    signal?.addEventListener("abort", abortRequest, { once: true });
+
     proxyRequest.on("connect", (res, socket) => {
+      tunnelSocket = socket;
       if ((res.statusCode ?? 0) < 200 || (res.statusCode ?? 0) >= 300) {
         socket.destroy();
-        reject(new Error(message("proxyConnectionFailed", { status: res.statusCode ?? 0 })));
+        fail(new Error(message("proxyConnectionFailed", { status: res.statusCode ?? 0 })));
         return;
       }
 
-      const tlsSocket = tlsConnect({
+      tlsSocket = tlsConnect({
         socket,
         servername: targetUrl.hostname,
         rejectUnauthorized: process.env.NODE_TLS_REJECT_UNAUTHORIZED === "0" ? false : undefined,
       });
-      tlsSocket.once("error", reject);
+      tlsSocket.once("error", fail);
       tlsSocket.once("secureConnect", () => {
         const responseChunks = [];
-        let settled = false;
-        const settle = () => {
-          if (settled) {
-            return;
-          }
-
-          settled = true;
+        const settleResponse = () => {
           try {
-            resolve(responseFromRawHttp(Buffer.concat(responseChunks)));
+            finish(resolve, responseFromRawHttp(Buffer.concat(responseChunks)));
           } catch (error) {
-            reject(error);
+            fail(error);
           }
         };
 
         tlsSocket.on("data", (chunk) => responseChunks.push(Buffer.from(chunk)));
-        tlsSocket.once("end", settle);
-        tlsSocket.once("close", settle);
+        tlsSocket.once("end", settleResponse);
+        tlsSocket.once("close", settleResponse);
+        const requestHeaders = Object.entries(headers)
+          .filter(([name]) => name.toLowerCase() !== "host")
+          .map(([name, value]) => `${name}: ${value}`);
         tlsSocket.write(
           [
-            `POST ${targetUrl.pathname}${targetUrl.search} HTTP/1.1`,
+            `${method} ${targetUrl.pathname}${targetUrl.search} HTTP/1.1`,
             `Host: ${targetUrl.host}`,
-            "Content-Type: application/json",
-            `Content-Length: ${Buffer.byteLength(body)}`,
-            "Connection: close",
+            ...requestHeaders,
             "",
             body,
           ].join("\r\n"),
         );
       });
     });
-    proxyRequest.on("error", reject);
+    proxyRequest.on("error", fail);
     proxyRequest.end();
   });
 }
 
-async function postJson(webhookUrl, payload) {
-  const body = JSON.stringify(payload);
+async function requestWebhook(webhookUrl, { method, body = "", signal }) {
   const targetUrl = new URL(webhookUrl);
-  const headers = {
-    "content-type": "application/json",
-    "content-length": String(Buffer.byteLength(body)),
-    connection: "close",
-  };
-  const proxyUrl = await proxyFor(targetUrl);
+  const headers = { connection: "close" };
+  if (body) {
+    headers["content-type"] = "application/json";
+    headers["content-length"] = String(Buffer.byteLength(body));
+  }
+  const proxyUrl = await proxyFor(targetUrl, signal);
 
   if (!proxyUrl) {
     return fetch(webhookUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body,
+      method,
+      headers,
+      body: body || undefined,
+      signal,
     });
   }
 
   if (targetUrl.protocol === "http:") {
-    return requestViaHttpProxy(targetUrl, proxyUrl, body, headers);
+    return requestViaHttpProxy(targetUrl, proxyUrl, { method, body, headers, signal });
   }
 
   if (targetUrl.protocol === "https:") {
-    return requestViaHttpsProxy(targetUrl, proxyUrl, body);
+    return requestViaHttpsProxy(targetUrl, proxyUrl, { method, body, headers, signal });
   }
 
   throw new Error(message("unsupportedWebhookProtocol", { protocol: targetUrl.protocol }));
+}
+
+async function postJson(webhookUrl, payload, signal) {
+  return requestWebhook(webhookUrl, {
+    method: "POST",
+    body: JSON.stringify(payload),
+    signal,
+  });
 }
 
 function getFileArg(args) {
@@ -2401,14 +3473,322 @@ function isFullLocalUpload(args, file) {
   return !file && !getOption(args, "--tool") && !getOption(args, "--since");
 }
 
+function isRetryableHttpStatus(status) {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function retryAfterMilliseconds(response) {
+  const value = response?.headers?.get?.("retry-after");
+  if (!value) {
+    return null;
+  }
+  const seconds = Number(value);
+  const milliseconds = Number.isFinite(seconds)
+    ? seconds * 1000
+    : new Date(value).getTime() - Date.now();
+  return Number.isFinite(milliseconds) && milliseconds >= 0 && milliseconds <= 5 * 60 * 1000
+    ? milliseconds
+    : null;
+}
+
+function exponentialRetryDelay(attempt, response = null) {
+  const configured = Number(process.env.TOKENRANK_RETRY_BASE_MS ?? 1000);
+  const base = Number.isFinite(configured) && configured >= 0 ? configured : 1000;
+  const retryAfter = retryAfterMilliseconds(response);
+  if (retryAfter !== null) {
+    return retryAfter;
+  }
+  const jitter = process.env.TOKENRANK_TEST_NO_RETRY_JITTER === "1" ? 1 : 0.75 + Math.random() * 0.5;
+  return Math.min(30_000, Math.round(base * 2 ** attempt * jitter));
+}
+
+function webhookRequestTimeoutMilliseconds() {
+  const configured = Number(process.env.TOKENRANK_REQUEST_TIMEOUT_MS ?? 30_000);
+  return Number.isSafeInteger(configured) && configured > 0 && configured <= 5 * 60 * 1000
+    ? configured
+    : 30_000;
+}
+
+async function webhookRequestWithDeadline(webhookUrl, { method, payload = null }) {
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(new Error(message("requestTimedOut"))),
+    webhookRequestTimeoutMilliseconds(),
+  );
+  try {
+    const response = payload === null
+      ? await requestWebhook(webhookUrl, { method, signal: controller.signal })
+      : await postJson(webhookUrl, payload, controller.signal);
+    const responseText = await response.text();
+    return { response, responseText };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchWebhookAccountId(webhookUrl) {
+  for (let attempt = 0; attempt < maxUploadAttempts; attempt += 1) {
+    let response;
+    let responseText;
+    try {
+      ({ response, responseText } = await webhookRequestWithDeadline(webhookUrl, {
+        method: "GET",
+      }));
+    } catch (error) {
+      if (attempt + 1 >= maxUploadAttempts) {
+        throw error;
+      }
+      await sleep(exponentialRetryDelay(attempt));
+      continue;
+    }
+
+    let responseJson = null;
+    try {
+      responseJson = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      responseJson = null;
+    }
+    if (
+      response.ok &&
+      responseJson?.status === 0 &&
+      isSha256(responseJson.accountId)
+    ) {
+      return responseJson.accountId;
+    }
+    if (isRetryableHttpStatus(response.status) && attempt + 1 < maxUploadAttempts) {
+      await sleep(exponentialRetryDelay(attempt, response));
+      continue;
+    }
+    const error = responseJson?.error || responseText || `HTTP ${response.status}`;
+    throw new Error(message("uploadFailed", { error }));
+  }
+  throw new Error(message("uploadFailed", { error: "identity retry limit reached" }));
+}
+
+class CutoverDateConflictError extends Error {
+  constructor(expectedCutoverDate, revision) {
+    super(message("uploadFailed", { error: "CUTOVER_DATE_CONFLICT" }));
+    this.name = "CutoverDateConflictError";
+    this.expectedCutoverDate = expectedCutoverDate;
+    this.revision = revision;
+  }
+}
+
+class ActiveSnapshotConflictError extends Error {
+  constructor(activeSnapshotId, expectedCutoverDate, revision) {
+    super(message("uploadFailed", { error: "ACTIVE_SNAPSHOT_CONFLICT" }));
+    this.name = "ActiveSnapshotConflictError";
+    this.activeSnapshotId = activeSnapshotId;
+    this.expectedCutoverDate = expectedCutoverDate;
+    this.revision = revision;
+  }
+}
+
+function parseActiveSnapshotConflict(response, responseJson) {
+  if (
+    response.status !== 409 ||
+    !isPlainObject(responseJson) ||
+    responseJson.status !== -1 ||
+    responseJson.error !== "ACTIVE_SNAPSHOT_CONFLICT" ||
+    !isUuid(responseJson.activeSnapshotId) ||
+    !isIsoCalendarDate(responseJson.expectedCutoverDate) ||
+    !Number.isSafeInteger(responseJson.revision) ||
+    responseJson.revision < 0
+  ) {
+    return null;
+  }
+
+  return new ActiveSnapshotConflictError(
+    responseJson.activeSnapshotId,
+    responseJson.expectedCutoverDate,
+    responseJson.revision,
+  );
+}
+
+function parseCutoverDateConflict(response, responseJson) {
+  if (
+    response.status !== 409 ||
+    !isPlainObject(responseJson) ||
+    responseJson.status !== -1 ||
+    responseJson.error !== "CUTOVER_DATE_CONFLICT" ||
+    !isIsoCalendarDate(responseJson.expectedCutoverDate) ||
+    !Number.isSafeInteger(responseJson.revision) ||
+    responseJson.revision < 0
+  ) {
+    return null;
+  }
+
+  return new CutoverDateConflictError(
+    responseJson.expectedCutoverDate,
+    responseJson.revision,
+  );
+}
+
+function isValidUploadSuccess(responseJson, batch) {
+  return (
+    isPlainObject(responseJson) &&
+    responseJson.status === 0 &&
+    Number.isSafeInteger(responseJson.uploaded) &&
+    responseJson.uploaded === batch.entries.length &&
+    Number.isSafeInteger(responseJson.revision) &&
+    responseJson.revision >= 0 &&
+    (batch.syncMode !== "full" || typeof responseJson.committed === "boolean")
+  );
+}
+
+async function sendUploadBatch(webhookUrl, batch) {
+  for (let attempt = 0; attempt < maxUploadAttempts; attempt += 1) {
+    let response;
+    let responseText;
+    try {
+      ({ response, responseText } = await webhookRequestWithDeadline(webhookUrl, {
+        method: "POST",
+        payload: batch,
+      }));
+    } catch (error) {
+      if (attempt + 1 >= maxUploadAttempts) {
+        throw error;
+      }
+      await sleep(exponentialRetryDelay(attempt));
+      continue;
+    }
+
+    let responseJson = null;
+    try {
+      responseJson = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      responseJson = null;
+    }
+
+    if (response.ok && isValidUploadSuccess(responseJson, batch)) {
+      return responseJson;
+    }
+
+    const activeSnapshotConflict = parseActiveSnapshotConflict(response, responseJson);
+    if (activeSnapshotConflict) {
+      throw activeSnapshotConflict;
+    }
+
+    const cutoverConflict = parseCutoverDateConflict(response, responseJson);
+    if (cutoverConflict) {
+      throw cutoverConflict;
+    }
+
+    if (isRetryableHttpStatus(response.status) && attempt + 1 < maxUploadAttempts) {
+      await sleep(exponentialRetryDelay(attempt, response));
+      continue;
+    }
+
+    const error = responseJson?.error || responseText || `HTTP ${response.status}`;
+    throw new Error(message("uploadFailed", { error }));
+  }
+  throw new Error(message("uploadFailed", { error: "retry limit reached" }));
+}
+
 async function upload(args, options = {}) {
+  const file = getFileArg(args);
+  const stateful = isFullLocalUpload(args, file);
+  try {
+    if (stateful && options.collectorLock !== false) {
+      return await withCollectorLock(
+        () => uploadUnlocked(args, { ...options, collectorLock: false }, file),
+        { failWhenLocked: true },
+      );
+    }
+    return await uploadUnlocked(args, options, file);
+  } catch (error) {
+    if (stateful && options.trackState !== false) {
+      try {
+        await recordFailedLocalUpload();
+      } catch {
+        // Preserve the actionable upload error if local health-state persistence also fails.
+      }
+    }
+    throw error;
+  }
+}
+
+async function scanUploadInput(args, { quiet, sinceOverride, requireComplete }) {
+  const scanHealth = { truncated: false, readErrors: 0, skippedOversize: 0 };
+  const scanResult = await scanLocalUsage(args, {
+    progress: !quiet,
+    panels: !quiet,
+    sinceOverride,
+    health: scanHealth,
+    returnMeta: true,
+  });
+  if (
+    requireComplete &&
+    (scanResult.health.truncated ||
+      scanResult.health.readErrors > 0 ||
+      scanResult.health.skippedOversize > 0)
+  ) {
+    throw new Error(message("incompleteCutover"));
+  }
+  return { entries: scanResult.entries };
+}
+
+async function uploadUnlocked(args, options = {}, file = getFileArg(args)) {
   const quiet = Boolean(options.quiet);
   if (!quiet) {
     await printLogo();
   }
   const config = await readConfig();
   const webhookUrl = requireWebhookUrl(config.webhookUrl);
-  const file = getFileArg(args);
+  const stateful = isFullLocalUpload(args, file);
+  const endpointId = createHash("sha256").update(webhookUrl).digest("hex");
+  const deviceId = getDeviceId();
+  let previousAggregateState = await readAggregateState();
+  let pendingSnapshots = stateful ? await readPendingSnapshots() : [];
+  let pendingIncremental = stateful ? await readPendingIncremental() : null;
+  const cachedAccountIds = new Set(
+    [
+      previousAggregateState,
+      ...pendingSnapshots,
+      pendingIncremental,
+    ]
+      .filter(
+        (state) =>
+          state?.endpointId === endpointId && state.deviceId === deviceId,
+      )
+      .map((state) => state.accountId),
+  );
+  const accountId =
+    cachedAccountIds.size === 1
+      ? [...cachedAccountIds][0]
+      : await fetchWebhookAccountId(webhookUrl);
+  const stateIdentityChanged =
+    (previousAggregateState &&
+      (previousAggregateState.accountId !== accountId ||
+        previousAggregateState.deviceId !== deviceId)) ||
+    pendingSnapshots.some(
+      (snapshot) => snapshot.accountId !== accountId || snapshot.deviceId !== deviceId,
+    ) ||
+    (pendingIncremental &&
+      (pendingIncremental.accountId !== accountId ||
+        pendingIncremental.deviceId !== deviceId));
+  if (stateIdentityChanged) {
+    await rm(aggregateStatePath(), { force: true });
+    await writePendingSnapshots([]);
+    await clearPendingIncremental();
+    previousAggregateState = null;
+    pendingSnapshots = [];
+    pendingIncremental = null;
+  }
+  const replayablePendingSnapshot =
+    pendingSnapshots.find(
+      (snapshot) =>
+        snapshot.accountId === accountId &&
+        snapshot.endpointId === endpointId &&
+        snapshot.deviceId === deviceId,
+    ) ?? null;
+  const retainedIncremental =
+    pendingIncremental?.accountId === accountId && pendingIncremental.deviceId === deviceId
+      ? pendingIncremental
+      : null;
+  if (stateful && options.trackState !== false) {
+    await recordStartedLocalUpload(accountId, endpointId);
+  }
   if (!quiet) {
     if (useColor) {
       renderConnectionPanel(new URL(webhookUrl).host);
@@ -2417,82 +3797,343 @@ async function upload(args, options = {}) {
       printStep(message("webhookReady"), new URL(webhookUrl).origin);
     }
   }
-  const raw = file
-    ? JSON.parse(await readFile(file, "utf8"))
-    : { entries: await scanLocalUsage(args, { progress: !quiet }) };
+  let raw;
+  if (file) {
+    const fileReporter = createProgressReporter();
+    if (!quiet) {
+      fileReporter.start(message("loadingUsageFileProgress", { file }));
+    }
+    try {
+      raw = JSON.parse(await readFile(file, "utf8"));
+      fileReporter.clear();
+    } catch (error) {
+      fileReporter.clear();
+      throw error;
+    }
+  } else if (replayablePendingSnapshot) {
+    raw = { entries: replayablePendingSnapshot.entries };
+  } else {
+    const eventStartDate = stateful ? statefulEventStartDate() : null;
+    raw = await scanUploadInput(args, {
+      quiet,
+      sinceOverride: eventStartDate,
+      requireComplete: stateful,
+    });
+  }
   if (file && !quiet) {
     printStep(message("loadedUsageFile"), file);
   }
   if (!quiet && !useColor) {
     printStep(message("buildPayload"));
   }
-  const payload = buildUploadPayload(raw);
-  const batches = payload.entries.length
-    ? Array.from({ length: Math.ceil(payload.entries.length / 500) }, (_, index) => ({
-        ...payload,
-        entries: payload.entries.slice(index * 500, index * 500 + 500),
-      }))
-    : [payload];
+  const uploadReporter = createProgressReporter();
+  if (!quiet) {
+    uploadReporter.start(message("buildPayload"));
+  }
+
+  let payload;
+  try {
+    payload = buildUploadPayload(raw);
+    if (stateful && retainedIncremental) {
+      payload.entries = mergeHighWaterEntries(
+        payload.entries,
+        retainedIncremental.entries,
+      );
+    }
+  } catch (error) {
+    uploadReporter.clear();
+    throw error;
+  }
+  if (
+    !stateful &&
+    (previousAggregateState?.deviceId !== payload.deviceId ||
+      previousAggregateState.endpointId !== endpointId)
+  ) {
+    uploadReporter.clear();
+    throw new Error(message("filteredUploadRequiresFullSync"));
+  }
+  let plan = stateful
+    ? replayablePendingSnapshot
+      ? {
+          syncMode: "full",
+          entries: replayablePendingSnapshot.entries,
+          aggregates: aggregateStateFromEntries(replayablePendingSnapshot.entries),
+          snapshotId: null,
+          cutoverDate: replayablePendingSnapshot.cutoverDate,
+          batchSize: replayablePendingSnapshot.batchSize,
+        }
+      : planStatefulSync(payload, previousAggregateState, accountId, endpointId)
+    : {
+        syncMode: "incremental",
+        entries: payload.entries,
+        snapshotId: null,
+      };
+  if (plan.syncMode === "full") {
+    plan = await stabilizeFullSnapshotPlan(
+      payload,
+      plan,
+      accountId,
+      endpointId,
+      replayablePendingSnapshot,
+    );
+  }
+  if (stateful && plan.syncMode === "incremental" && plan.entries.length > 0) {
+    const incrementalState = {
+      accountingVersion,
+      deviceId: payload.deviceId,
+      accountId,
+      endpointId,
+      cutoverDate: plan.cutoverDate,
+      entries: plan.entries,
+      createdAt: currentTime().toISOString(),
+    };
+    await writePendingIncremental({
+      ...incrementalState,
+      digest: incrementalDigestFor(incrementalState),
+    });
+  }
+  let batches = buildProtocolBatches(payload, plan);
 
   if (!quiet && !useColor) {
     printStep(
       message("uploading", {
-        count: payload.entries.length,
-        rows: rowLabel(payload.entries.length),
+        count: plan.entries.length,
+        rows: rowLabel(plan.entries.length),
         batches: batches.length,
       }),
     );
   }
 
-  for (const [index, batch] of batches.entries()) {
-    if (!quiet && !useColor) {
-      printMuted(
-        `   ${message("batch", {
-          current: index + 1,
-          total: batches.length,
-          count: batch.entries.length,
-          rows: rowLabel(batch.entries.length),
-        })}`,
-      );
-    }
-    const response = await postJson(webhookUrl, batch);
-    const responseText = await response.text();
-    let responseJson = null;
-
+  let finalResponse = null;
+  let cutoverRecoveryRevision = null;
+  let cutoverRecoveryAttempted = false;
+  let activeSnapshotRecoveryAttempted = false;
+  let replayedActiveSnapshot = false;
+  let deferredSnapshotId = null;
+  while (true) {
     try {
-      responseJson = responseText ? JSON.parse(responseText) : null;
-    } catch {
-      responseJson = null;
-    }
+      finalResponse = null;
+      for (const [index, batch] of batches.entries()) {
+        if (!quiet) {
+          uploadReporter.update(
+            message("uploadBatchProgress", {
+              current: index + 1,
+              total: batches.length,
+              count: batch.entries.length,
+              rows: rowLabel(batch.entries.length),
+            }),
+          );
+        }
+        if (!quiet && !useColor) {
+          printMuted(
+            `   ${message("batch", {
+              current: index + 1,
+              total: batches.length,
+              count: batch.entries.length,
+              rows: rowLabel(batch.entries.length),
+            })}`,
+          );
+        }
+        finalResponse = await sendUploadBatch(webhookUrl, batch);
+      }
+      if (
+        replayedActiveSnapshot &&
+        finalResponse?.committed === true &&
+        deferredSnapshotId
+      ) {
+        const completedSnapshotId = plan.snapshotId;
+        await removePendingSnapshots(
+          (snapshot) => snapshot.snapshotId === completedSnapshotId,
+        );
+        const deferredSnapshot = (await readPendingSnapshots()).find(
+          (snapshot) =>
+            snapshot.accountId === accountId &&
+            snapshot.deviceId === payload.deviceId &&
+            snapshot.endpointId === endpointId &&
+            snapshot.snapshotId === deferredSnapshotId,
+        );
+        if (deferredSnapshot) {
+          payload = buildUploadPayload({ entries: deferredSnapshot.entries });
+          plan = {
+            syncMode: "full",
+            entries: deferredSnapshot.entries,
+            aggregates: aggregateStateFromEntries(deferredSnapshot.entries),
+            snapshotId: deferredSnapshot.snapshotId,
+            cutoverDate: deferredSnapshot.cutoverDate,
+            batchSize: deferredSnapshot.batchSize,
+          };
+          batches = buildProtocolBatches(payload, plan);
+          replayedActiveSnapshot = false;
+          deferredSnapshotId = null;
+          continue;
+        }
+      }
+      break;
+    } catch (error) {
+      const activePending =
+        stateful &&
+        plan.syncMode === "full" &&
+        !activeSnapshotRecoveryAttempted &&
+        error instanceof ActiveSnapshotConflictError
+          ? (await readPendingSnapshots()).find(
+              (snapshot) =>
+                snapshot.accountId === accountId &&
+                snapshot.deviceId === payload.deviceId &&
+                snapshot.snapshotId === error.activeSnapshotId &&
+                snapshot.cutoverDate === error.expectedCutoverDate,
+            )
+          : null;
+      const revisionMatches =
+        previousAggregateState?.revision === null ||
+        previousAggregateState?.revision === undefined ||
+        (error instanceof ActiveSnapshotConflictError &&
+          error.revision >= previousAggregateState.revision);
+      if (activePending && revisionMatches) {
+        activeSnapshotRecoveryAttempted = true;
+        deferredSnapshotId = plan.snapshotId;
+        replayedActiveSnapshot = true;
+        cutoverRecoveryRevision = error.revision;
+        uploadReporter.clear();
+        payload = buildUploadPayload({ entries: activePending.entries });
+        plan = {
+          syncMode: "full",
+          entries: activePending.entries,
+          aggregates: aggregateStateFromEntries(activePending.entries),
+          snapshotId: activePending.snapshotId,
+          cutoverDate: activePending.cutoverDate,
+          batchSize: activePending.batchSize,
+        };
+        batches = buildProtocolBatches(payload, plan);
+        if (!quiet) {
+          uploadReporter.start(message("buildPayload"));
+        }
+        continue;
+      }
 
-    if (!response.ok || responseJson?.status !== 0) {
-      const error = responseJson?.error || responseText || `HTTP ${response.status}`;
-      throw new Error(message("uploadFailed", { error }));
-    }
+      const canRecoverCutover =
+        stateful &&
+        plan.syncMode === "full" &&
+        !cutoverRecoveryAttempted &&
+        error instanceof CutoverDateConflictError &&
+        error.expectedCutoverDate !== plan.cutoverDate;
+      if (!canRecoverCutover) {
+        uploadReporter.clear();
+        throw error;
+      }
 
-    if (!quiet) {
-      await renderUploadGrid(index + 1, batches.length, payload.entries.length);
+      cutoverRecoveryAttempted = true;
+      cutoverRecoveryRevision = error.revision;
+      uploadReporter.clear();
+      await removePendingSnapshots(
+        (snapshot) =>
+          snapshot.accountId === accountId &&
+          snapshot.deviceId === payload.deviceId &&
+          snapshot.snapshotId === plan.snapshotId,
+      );
+      raw = await scanUploadInput(args, {
+        quiet,
+        sinceOverride: error.expectedCutoverDate,
+        requireComplete: true,
+      });
+      payload = buildUploadPayload(raw);
+      if (retainedIncremental) {
+        payload.entries = mergeHighWaterEntries(
+          payload.entries,
+          retainedIncremental.entries,
+        );
+      }
+      plan = planStatefulSync(
+        payload,
+        previousAggregateState,
+        accountId,
+        endpointId,
+        currentTime(),
+        error.expectedCutoverDate,
+      );
+      plan = await stabilizeFullSnapshotPlan(
+        payload,
+        plan,
+        accountId,
+        endpointId,
+        null,
+      );
+      batches = buildProtocolBatches(payload, plan);
+      if (!quiet) {
+        uploadReporter.start(message("buildPayload"));
+      }
     }
   }
 
-  if (!quiet && !useColor) {
-    if (terminalIsTty) {
-      printSuccess(message("uploadComplete"), `${payload.entries.length} ${rowLabel(payload.entries.length)}`);
+  if (plan.syncMode === "full" && finalResponse?.committed !== true) {
+    uploadReporter.clear();
+    throw new Error(message("snapshotNotCommitted"));
+  }
+
+  if (stateful && batches.length > 0) {
+    await writeAggregateState({
+      accountingVersion,
+      deviceId: payload.deviceId,
+      accountId,
+      endpointId,
+      lastFullSyncDate:
+        plan.syncMode === "full"
+          ? reconciliationDate(plan.cutoverDate)
+          : previousAggregateState.lastFullSyncDate,
+      aggregates: plan.aggregates,
+      cutoverDate: plan.cutoverDate,
+      revision:
+        finalResponse?.revision ??
+        cutoverRecoveryRevision ??
+        previousAggregateState?.revision ??
+        null,
+      updatedAt: currentTime().toISOString(),
+    });
+    if (plan.syncMode === "full") {
+      await removePendingSnapshots(
+        (snapshot) =>
+          snapshot.accountId === accountId &&
+          snapshot.deviceId === payload.deviceId &&
+          (snapshot.snapshotId === plan.snapshotId ||
+            (!replayedActiveSnapshot && snapshot.endpointId === endpointId)),
+      );
+      if (!replayedActiveSnapshot) {
+        await clearPendingIncremental();
+      }
+    } else {
+      await clearPendingIncremental();
+    }
+  }
+
+  if (!quiet) {
+    uploadReporter.finish(
+      message("uploadProgressSummary", {
+        count: plan.entries.length,
+        rows: rowLabel(plan.entries.length),
+        batches: batches.length,
+      }),
+    );
+    if (useColor || terminalIsTty) {
+      printSuccess(message("uploadComplete"), `${plan.entries.length} ${rowLabel(plan.entries.length)}`);
     } else {
       printSuccess(
         message("uploadSuccess", {
-          count: payload.entries.length,
-          rows: rowLabel(payload.entries.length),
+          count: plan.entries.length,
+          rows: rowLabel(plan.entries.length),
         }),
       );
     }
   }
 
-  if (isFullLocalUpload(args, file) && options.trackState !== false) {
-    await recordSuccessfulLocalUpload();
+  if (stateful && options.trackState !== false) {
+    await recordSuccessfulLocalUpload(accountId, endpointId);
   }
 
-  return { uploaded: payload.entries.length };
+  return {
+    uploaded: plan.entries.length,
+    syncMode: plan.syncMode,
+    accountId,
+    endpointId,
+  };
 }
 
 function parseInterval(args) {
@@ -2554,16 +4195,7 @@ function launchdPlist() {
   const binPath = fileURLToPath(import.meta.url);
   const logDir = path.join(homedir(), ".tokenrank");
   const args = [process.execPath, binPath, "daemon", "--once", "--scheduled"];
-  const schedule = collectorScheduleHours
-    .map(
-      (hour) => `    <dict>
-      <key>Hour</key>
-      <integer>${hour}</integer>
-      <key>Minute</key>
-      <integer>0</integer>
-    </dict>`,
-    )
-    .join("\n");
+  const minute = collectorScheduleMinute();
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -2576,9 +4208,10 @@ function launchdPlist() {
 ${args.map((arg) => `    <string>${xmlEscape(arg)}</string>`).join("\n")}
   </array>
   <key>StartCalendarInterval</key>
-  <array>
-${schedule}
-  </array>
+  <dict>
+    <key>Minute</key>
+    <integer>${minute}</integer>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>StandardOutPath</key>
@@ -2603,12 +4236,12 @@ ExecStart=${process.execPath} ${binPath} daemon --once --scheduled
 }
 
 function systemdTimer() {
+  const minute = String(collectorScheduleMinute()).padStart(2, "0");
   return `[Unit]
-Description=Run TokenRank collector at 00:00 and 12:00
+Description=Run TokenRank collector hourly at a stable device-specific minute
 
 [Timer]
-OnCalendar=*-*-* 00:00:00
-OnCalendar=*-*-* 12:00:00
+OnCalendar=*-*-* *:${minute}:00
 Persistent=true
 
 [Install]
@@ -2637,13 +4270,13 @@ function windowsTaskXml(runnerPath) {
     process.env.USERNAME ||
     "SYSTEM";
   const runnerArgs = `-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "${runnerPath}"`;
+  const minute = String(collectorScheduleMinute()).padStart(2, "0");
 
   return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo><Description>TokenRank collector at 00:00, 12:00, and after missed runs.</Description></RegistrationInfo>
+  <RegistrationInfo><Description>TokenRank collector hourly at a stable device-specific minute and after missed runs.</Description></RegistrationInfo>
   <Triggers>
-    <CalendarTrigger><StartBoundary>2020-01-01T00:00:00</StartBoundary><Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>
-    <CalendarTrigger><StartBoundary>2020-01-01T12:00:00</StartBoundary><Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>
+    <CalendarTrigger><StartBoundary>2020-01-01T00:${minute}:00</StartBoundary><Enabled>true</Enabled><Repetition><Interval>PT1H</Interval><Duration>P1D</Duration><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>
     <LogonTrigger><Enabled>true</Enabled><UserId>${xmlEscape(userName)}</UserId></LogonTrigger>
   </Triggers>
   <Principals><Principal id="Author"><UserId>${xmlEscape(userName)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
@@ -2703,52 +4336,82 @@ async function installService(args = []) {
     taskName,
     legacyTaskNames = [],
   } = servicePaths();
-  await mkdir(path.dirname(file), { recursive: true });
-  await mkdir(path.join(homedir(), ".tokenrank"), { recursive: true, mode: 0o700 });
-  await writeFile(
-    file,
-    kind === "launchd" ? launchdPlist() : kind === "schtasks" ? windowsTaskRunner() : systemdUnit(),
-  );
-  if (timerFile) {
-    await writeFile(timerFile, systemdTimer());
-  }
-  if (taskFile) {
-    await writeFile(taskFile, `\uFEFF${windowsTaskXml(file)}`, "utf16le");
-  }
+  const reporter = createProgressReporter();
+  reporter.start(message("installingBackgroundSync"));
 
-  if (!process.env.TOKENRANK_SERVICE_NO_REGISTER) {
-    if (kind === "launchd") {
-      await runOptional("launchctl", ["unload", file]);
-      await execFileAsync("launchctl", ["load", file]);
-    } else if (kind === "schtasks") {
-      for (const legacyName of legacyTaskNames) {
-        await runOptional("schtasks.exe", ["/Delete", "/TN", legacyName, "/F"]);
-      }
-      await execFileAsync("schtasks.exe", [
-        "/Create",
-        "/TN",
-        taskName,
-        "/XML",
-        taskFile,
-        "/F",
-      ]);
-    } else {
-      await execFileAsync("systemctl", ["--user", "daemon-reload"]);
-      await execFileAsync("systemctl", ["--user", "enable", "--now", "tokenrank-collector.timer"]);
+  try {
+    await mkdir(path.dirname(file), { recursive: true });
+    await mkdir(path.join(homedir(), ".tokenrank"), { recursive: true, mode: 0o700 });
+    await writeFile(
+      file,
+      kind === "launchd" ? launchdPlist() : kind === "schtasks" ? windowsTaskRunner() : systemdUnit(),
+    );
+    if (timerFile) {
+      await writeFile(timerFile, systemdTimer());
     }
+    if (taskFile) {
+      await writeFile(taskFile, `\uFEFF${windowsTaskXml(file)}`, "utf16le");
+    }
+
+    if (!process.env.TOKENRANK_SERVICE_NO_REGISTER) {
+      if (kind === "launchd") {
+        await runOptional("launchctl", ["unload", file]);
+        await execFileAsync("launchctl", ["load", file]);
+      } else if (kind === "schtasks") {
+        for (const legacyName of legacyTaskNames) {
+          await runOptional("schtasks.exe", ["/Delete", "/TN", legacyName, "/F"]);
+        }
+        await execFileAsync("schtasks.exe", [
+          "/Create",
+          "/TN",
+          taskName,
+          "/XML",
+          taskFile,
+          "/F",
+        ]);
+      } else {
+        await execFileAsync("systemctl", ["--user", "daemon-reload"]);
+        await execFileAsync("systemctl", ["--user", "enable", "--now", "tokenrank-collector.timer"]);
+      }
+    }
+  } catch (error) {
+    reporter.clear();
+    throw error;
   }
+  reporter.clear();
 
   if (hasLegacyIntervalArg) {
-    console.log(message("ignoredInterval", { schedule: message("dailySchedule") }));
+    console.log(message("ignoredInterval", { schedule: message("dailySchedule", { minute: collectorScheduleMinute() }) }));
   }
-  console.log(message("installedBackgroundService", { file }));
-  console.log(message("collectionSchedule", { schedule: message("dailySchedule") }));
+  printSuccess(message("installedBackgroundService", { file }));
+  printMuted(message("collectionSchedule", { schedule: message("dailySchedule", { minute: collectorScheduleMinute() }) }));
 }
 
 async function serviceStatus() {
   const { file } = servicePaths();
-  const installed = await serviceInstalled();
-  console.log(installed ? message("installed", { file }) : message("notInstalled"));
+  const reporter = createProgressReporter();
+  reporter.start(message("checkingBackgroundSync"));
+  let installed;
+  try {
+    installed = await serviceInstalled();
+  } finally {
+    reporter.clear();
+  }
+  if (useColor) {
+    printPanel(
+      [
+        {
+          left: file,
+          right: `● ${installed ? message("serviceInstalled") : message("serviceNotInstalled")}`,
+          leftColor: cliPalette.muted,
+          rightColor: installed ? cliPalette.lime : cliPalette.orange,
+        },
+      ],
+      { title: cliLocale === "zh" ? "后台同步" : "BACKGROUND SYNC" },
+    );
+  } else {
+    console.log(installed ? message("installed", { file }) : message("notInstalled"));
+  }
 }
 
 async function serviceInstalled() {
@@ -2771,70 +4434,223 @@ async function serviceInstalled() {
 
 async function uninstallService() {
   const { kind, file, timerFile, taskFile, legacyTaskNames = [] } = servicePaths();
+  const reporter = createProgressReporter();
+  reporter.start(message("removingBackgroundSync"));
 
-  if (!process.env.TOKENRANK_SERVICE_NO_REGISTER) {
-    if (kind === "launchd") {
-      await runOptional("launchctl", ["unload", file]);
-    } else if (kind === "schtasks") {
-      for (const legacyName of legacyTaskNames) {
-        await runOptional("schtasks.exe", ["/Delete", "/TN", legacyName, "/F"]);
+  try {
+    if (!process.env.TOKENRANK_SERVICE_NO_REGISTER) {
+      if (kind === "launchd") {
+        await runOptional("launchctl", ["unload", file]);
+      } else if (kind === "schtasks") {
+        for (const legacyName of legacyTaskNames) {
+          await runOptional("schtasks.exe", ["/Delete", "/TN", legacyName, "/F"]);
+        }
+      } else {
+        await runOptional("systemctl", ["--user", "disable", "--now", "tokenrank-collector.timer"]);
+        await runOptional("systemctl", ["--user", "daemon-reload"]);
       }
-    } else {
-      await runOptional("systemctl", ["--user", "disable", "--now", "tokenrank-collector.timer"]);
-      await runOptional("systemctl", ["--user", "daemon-reload"]);
     }
-  }
 
-  await rm(file, { force: true });
-  if (timerFile) {
-    await rm(timerFile, { force: true });
+    await rm(file, { force: true });
+    if (timerFile) {
+      await rm(timerFile, { force: true });
+    }
+    if (taskFile) {
+      await rm(taskFile, { force: true });
+    }
+  } catch (error) {
+    reporter.clear();
+    throw error;
   }
-  if (taskFile) {
-    await rm(taskFile, { force: true });
-  }
-  console.log(message("uninstallService", { file }));
+  reporter.clear();
+  printSuccess(message("uninstallService", { file }));
 }
 
 function nextScheduleBoundary(now = currentTime()) {
   const next = latestScheduleBoundary(now);
-  next.setHours(next.getHours() + 12);
+  next.setHours(next.getHours() + 1);
   return next;
 }
 
-async function statusCommand() {
+async function statusCommand(args = []) {
+  const json = args.includes("--json");
+  const reporter = createProgressReporter();
+  if (!json) {
+    reporter.start(message("checkingCollectorStatus"));
+  }
   let connected = false;
+  let configuredEndpointId = null;
+  let state;
+  let aggregateState;
+  let installed;
+
   try {
-    const config = await readConfig();
-    requireWebhookUrl(config.webhookUrl);
-    connected = true;
-  } catch {
-    connected = false;
+    try {
+      const config = await readConfig();
+      const webhookUrl = requireWebhookUrl(config.webhookUrl);
+      configuredEndpointId = createHash("sha256").update(webhookUrl).digest("hex");
+      connected = true;
+    } catch {
+      connected = false;
+    }
+
+    state = await readServiceState();
+    aggregateState = await readAggregateState();
+    installed = await serviceInstalled();
+  } finally {
+    reporter.clear();
   }
 
-  const state = await readServiceState();
-  const installed = await serviceInstalled();
-  console.log(connected ? message("connected") : message("notConnected"));
-  console.log(installed ? message("serviceInstalled") : message("serviceNotInstalled"));
-  console.log(`${message("lastSuccess")}\t${state.lastSuccessfulAt ?? message("never")}`);
-  console.log(`${message("lastError")}\t${state.lastErrorCode ?? message("none")}`);
-  console.log(`${message("nextBoundary")}\t${nextScheduleBoundary().toISOString()}`);
+  const lastSuccessfulAt = isIsoTimestamp(state.lastSuccessfulAt)
+    ? state.lastSuccessfulAt
+    : null;
+  const lastErrorCode =
+    typeof state.lastErrorCode === "string" && state.lastErrorCode
+      ? state.lastErrorCode
+      : null;
+  const verified =
+    connected &&
+    Boolean(lastSuccessfulAt) &&
+    isSha256(state.lastSuccessfulAccountId) &&
+    state.lastSuccessfulEndpointId === configuredEndpointId &&
+    aggregateState?.accountId === state.lastSuccessfulAccountId &&
+    aggregateState.endpointId === configuredEndpointId;
+  const healthy = verified && lastErrorCode === null;
+  const status = !connected
+    ? "UNCONFIGURED"
+    : healthy
+      ? "HEALTHY"
+      : verified
+        ? "VERIFIED"
+        : "CONFIGURED";
+  const result = {
+    status,
+    configured: connected,
+    verified,
+    healthy,
+    serviceInstalled: installed,
+    lastAttemptAt: isIsoTimestamp(state.lastAttemptAt) ? state.lastAttemptAt : null,
+    lastSuccessfulAt,
+    lastErrorCode,
+    nextScheduledAt: nextScheduleBoundary().toISOString(),
+  };
+
+  if (json) {
+    console.log(JSON.stringify(result, null, 2));
+    if (!healthy) {
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  if (useColor) {
+    printPanel(
+      [
+        {
+          left: "STATUS",
+          right: status,
+          leftColor: cliPalette.muted,
+          rightColor: healthy ? cliPalette.lime : cliPalette.orange,
+        },
+        {
+          left: message("uploadEndpoint"),
+          right: `● ${connected ? message("connected") : message("notConnected")}`,
+          leftColor: cliPalette.muted,
+          rightColor: connected ? cliPalette.lime : cliPalette.orange,
+        },
+        {
+          left: cliLocale === "zh" ? "后台同步" : "BACKGROUND SYNC",
+          right: `● ${installed ? message("serviceInstalled") : message("serviceNotInstalled")}`,
+          leftColor: cliPalette.muted,
+          rightColor: installed ? cliPalette.lime : cliPalette.orange,
+        },
+        { divider: true },
+        {
+          left: message("lastSuccess"),
+          right: lastSuccessfulAt ?? message("never"),
+          leftColor: cliPalette.muted,
+          rightColor: cliPalette.ivory,
+        },
+        {
+          left: message("lastError"),
+          right: lastErrorCode ?? message("none"),
+          leftColor: cliPalette.muted,
+          rightColor: lastErrorCode ? cliPalette.orange : cliPalette.ivory,
+        },
+        {
+          left: message("nextBoundary"),
+          right: result.nextScheduledAt,
+          leftColor: cliPalette.muted,
+          rightColor: cliPalette.ivory,
+        },
+      ],
+      { title: message("gridStatus") },
+    );
+  } else {
+    console.log(`STATUS\t${status}`);
+    console.log(connected ? message("connected") : message("notConnected"));
+    console.log(installed ? message("serviceInstalled") : message("serviceNotInstalled"));
+    console.log(`${message("lastSuccess")}\t${lastSuccessfulAt ?? message("never")}`);
+    console.log(`${message("lastError")}\t${lastErrorCode ?? message("none")}`);
+    console.log(`${message("nextBoundary")}\t${result.nextScheduledAt}`);
+  }
+
+  if (!healthy) {
+    process.exitCode = 1;
+  }
 }
 
 async function doctorCommand() {
-  for (const source of sourceDefinitions()) {
-    let files = 0;
-    let rows = 0;
-    let failed = false;
+  const sources = sourceDefinitions();
+  const results = [];
+  const discoveredSources = [];
+  const reporter = createProgressReporter();
+  let totalFiles = 0;
+  let scannedFiles = 0;
+  let totalRows = 0;
 
-    for (const root of source.roots) {
-      const sourceFiles = (
-        await collectFiles(root, 1000, { includeLogs: source.includeLogs })
-      ).filter(
-        (file) => !source.includeFile || source.includeFile(file),
+  try {
+    if (sources.length > 0) {
+      reporter.start(
+        message("discoveringSourceProgress", {
+          source: sources[0].label,
+          current: 1,
+          total: sources.length,
+          files: 0,
+        }),
       );
-      files += sourceFiles.length;
+    }
 
-      for (const file of sourceFiles) {
+    for (const [sourceIndex, source] of sources.entries()) {
+      const files = await collectSourceFiles(source);
+      totalFiles += files.length;
+      discoveredSources.push({ source, files });
+      reporter.update(
+        message("discoveringSourceProgress", {
+          source: source.label,
+          current: sourceIndex + 1,
+          total: sources.length,
+          files: totalFiles,
+        }),
+      );
+    }
+
+    for (const [sourceIndex, { source, files }] of discoveredSources.entries()) {
+      let rows = 0;
+      let failed = false;
+
+      reporter.update(
+        message("scanningSourceProgress", {
+          source: source.label,
+          current: sourceIndex + 1,
+          total: sources.length,
+          fileCurrent: scannedFiles,
+          fileTotal: totalFiles,
+          rows: totalRows,
+        }),
+      );
+
+      for (const file of files) {
         try {
           for await (const _entry of readUsageFile(file, source.tool, {
             id: source.id ?? `${source.tool}-local`,
@@ -2842,24 +4658,99 @@ async function doctorCommand() {
           })) {
             void _entry;
             rows += 1;
+            totalRows += 1;
+            if (totalRows % 100 === 0) {
+              reporter.update(
+                message("scanningSourceProgress", {
+                  source: source.label,
+                  current: sourceIndex + 1,
+                  total: sources.length,
+                  fileCurrent: scannedFiles,
+                  fileTotal: totalFiles,
+                  rows: totalRows,
+                }),
+              );
+            }
           }
         } catch {
           failed = true;
         }
+
+        scannedFiles += 1;
+        reporter.update(
+          message("scanningSourceProgress", {
+            source: source.label,
+            current: sourceIndex + 1,
+            total: sources.length,
+            fileCurrent: scannedFiles,
+            fileTotal: totalFiles,
+            rows: totalRows,
+          }),
+        );
       }
+
+      const status = failed
+        ? message("error")
+        : rows > 0
+          ? message("ready")
+          : source.tool === "cursor"
+            ? message("exactSourceRequired")
+            : files.length > 0
+              ? message("detectedNoRows")
+              : message("unavailable");
+      results.push({ source, status, files: files.length, rows, failed });
     }
 
-    const status = failed
-      ? message("error")
-      : rows > 0
-        ? message("ready")
-        : source.tool === "cursor"
-          ? message("exactSourceRequired")
-          : files > 0
-            ? message("detectedNoRows")
-            : message("unavailable");
+    reporter.finish(
+      message("doctorProgressSummary", {
+        sources: sources.length,
+        files: totalFiles,
+        rows: totalRows,
+        ready: results.filter((result) => result.rows > 0 && !result.failed).length,
+      }),
+    );
+  } catch (error) {
+    reporter.clear();
+    throw error;
+  }
+
+  if (useColor) {
+    const rows = [
+      {
+        left: cliLocale === "zh" ? "工具 / 状态" : "TOOL / STATUS",
+        right: cliLocale === "zh" ? "文件 · 记录" : "FILES · ROWS",
+        leftColor: cliPalette.muted,
+        rightColor: cliPalette.muted,
+      },
+      { divider: true },
+      ...results.map((result) => {
+        const ready = result.rows > 0 && !result.failed;
+        const statusColor = result.failed
+          ? cliPalette.orange
+          : ready
+            ? cliPalette.lime
+            : cliPalette.muted;
+        return {
+          left: `${padCell(result.source.tool, uiWidth() >= 64 ? 22 : 14)} ${result.status}`,
+          leftSegments: [
+            {
+              value: padCell(result.source.tool, uiWidth() >= 64 ? 22 : 14),
+              color: cliPalette.ivory,
+            },
+            { value: ` ${result.status}`, color: statusColor },
+          ],
+          right: `${result.files} · ${result.rows}`,
+          rightColor: cliPalette.muted,
+        };
+      }),
+    ];
+    printPanel(rows, { title: message("sourceDiagnostics") });
+    return;
+  }
+
+  for (const result of results) {
     console.log(
-      `${source.tool}\t${status}\t${files} ${message("files")}\t${rows} ${rowLabel(rows)}`,
+      `${result.source.tool}\t${result.status}\t${result.files} ${message("files")}\t${result.rows} ${rowLabel(result.rows)}`,
     );
   }
 }
@@ -2873,6 +4764,9 @@ async function runScheduledUpload(args) {
     const now = currentTime();
     const boundary = latestScheduleBoundary(now);
     const state = await readServiceState();
+    const config = await readConfig();
+    const webhookUrl = requireWebhookUrl(config.webhookUrl);
+    const attemptEndpointId = createHash("sha256").update(webhookUrl).digest("hex");
 
     if (
       state.lastScheduledBoundary &&
@@ -2884,18 +4778,23 @@ async function runScheduledUpload(args) {
     await writeServiceState({
       ...state,
       lastAttemptAt: now.toISOString(),
-      lastErrorCode: null,
+      lastAttemptEndpointId: attemptEndpointId,
+      lastErrorCode: "UPLOAD_IN_PROGRESS",
     });
 
     try {
       const result = await upload(
         args.filter((arg) => arg !== "--scheduled"),
-        { quiet: true, trackState: false },
+        { quiet: true, trackState: false, collectorLock: false },
       );
       await writeServiceState({
         ...state,
         lastAttemptAt: now.toISOString(),
+        lastAttemptAccountId: result.accountId,
+        lastAttemptEndpointId: result.endpointId,
         lastSuccessfulAt: now.toISOString(),
+        lastSuccessfulAccountId: result.accountId,
+        lastSuccessfulEndpointId: result.endpointId,
         lastScheduledBoundary: boundary.toISOString(),
         lastErrorCode: null,
       });
@@ -2930,7 +4829,7 @@ async function daemon(args) {
 }
 
 async function preview(args) {
-  const entries = await scanLocalUsage(args);
+  const entries = await scanLocalUsage(args, { progress: true, panels: false });
   const payload = buildUploadPayload({ entries });
 
   if (args.includes("--json")) {
@@ -2938,8 +4837,45 @@ async function preview(args) {
     return;
   }
 
+  await printLogo();
+
   if (!entries.length) {
-    console.log(message("noLocalUsage"));
+    if (useColor) {
+      printPanel(
+        [{ left: message("noLocalUsage"), leftColor: cliPalette.muted }],
+        { title: message("scanLocalUsage") },
+      );
+    } else {
+      console.log(message("noLocalUsage"));
+    }
+    return;
+  }
+
+  if (useColor) {
+    const formatter = new Intl.NumberFormat(cliLocale === "zh" ? "zh-CN" : "en-US");
+    const toolWidth = uiWidth() >= 64 ? 18 : 12;
+    const rows = [
+      {
+        left: cliLocale === "zh" ? "日期 / 工具 / 模型" : "DATE / TOOL / MODEL",
+        right: cliLocale === "zh" ? "TOKEN" : "TOKENS",
+        leftColor: cliPalette.muted,
+        rightColor: cliPalette.muted,
+      },
+      { divider: true },
+      ...entries.map((entry) => ({
+        left: `${entry.date} ${padCell(entry.tool, toolWidth)} ${entry.model}`,
+        leftSegments: [
+          { value: `${entry.date} `, color: cliPalette.muted },
+          { value: `${padCell(entry.tool, toolWidth)} `, color: cliPalette.lime },
+          { value: entry.model, color: cliPalette.ivory },
+        ],
+        right: formatter.format(entry.total),
+        rightColor: cliPalette.orange,
+      })),
+    ];
+    printPanel(rows, {
+      title: `${message("scanLocalUsage")} · ${entries.length} ${rowLabel(entries.length)}`,
+    });
     return;
   }
 
@@ -2954,24 +4890,36 @@ async function main() {
   switch (command) {
     case "tools":
       await printLogo();
-      printSection(message("supportedTools"));
-      for (const tool of TOOL_KEYS) {
-        console.log(`${trueColor("•", cliPalette.lime)} ${tool}`);
+      if (useColor) {
+        renderToolsPanel();
+      } else {
+        printSection(message("supportedTools"));
+        for (const tool of TOOL_KEYS) {
+          console.log(`• ${tool}`);
+        }
       }
       return;
     case "sources":
       await printLogo();
-      printSection(message("localSourceAdapters"));
+      if (!useColor) {
+        printSection(message("localSourceAdapters"));
+      }
       printSources();
       return;
     case "status":
-      await printLogo();
-      printSection(message("gridStatus"));
-      await statusCommand();
+      if (!args.includes("--json")) {
+        await printLogo();
+      }
+      if (!useColor && !args.includes("--json")) {
+        printSection(message("gridStatus"));
+      }
+      await statusCommand(args);
       return;
     case "doctor":
       await printLogo();
-      printSection(message("sourceDiagnostics"));
+      if (!useColor) {
+        printSection(message("sourceDiagnostics"));
+      }
       await doctorCommand();
       return;
     case "preview":
@@ -2992,6 +4940,7 @@ async function main() {
       return;
     }
     case "logout":
+      await printLogo();
       await removeConfig();
       return;
     case "upload":
