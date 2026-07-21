@@ -103,6 +103,34 @@ const cliMessages = {
     privacy: "PRIVATE CONTENT NEVER LEAVES THIS MACHINE",
     proxyConnectionFailed: "Proxy connection failed: HTTP {status}",
     proxyResponseInvalid: "The proxy response is invalid.",
+    previewActiveDays: "ACTIVE DAYS",
+    previewActivity: "DAILY ACTIVITY · LAST {days} ACTIVE DAYS",
+    previewActivitySingle: "DAILY ACTIVITY · LAST ACTIVE DAY",
+    previewAiTools: "AI TOOLS",
+    previewConnectReady: "PRIVATE UPLOAD LINK CONNECTED",
+    previewCopyConnectCommand: "COPY PRIVATE CONNECT COMMAND",
+    previewCopyConnectHint: "shown after sign-in",
+    previewDailyAverage: "DAILY AVERAGE",
+    previewDateRange: "UTC DATE RANGE",
+    previewFootprint: "YOUR AI FOOTPRINT",
+    previewHeroPrivacy: "Local scan · Nothing uploaded",
+    previewHeroTagline: "YOUR AI USAGE, MADE VISIBLE",
+    previewModelBreakdown: "TOP MODELS",
+    previewModels: "MODELS",
+    previewMoreRows: "+{count} more aggregate rows",
+    previewNextClaimTitle: "NEXT · CLAIM YOUR RANK",
+    previewNextConnectedTitle: "NEXT · UPDATE YOUR RANK",
+    previewNothingUploaded: "THIS PREVIEW UPLOADED NOTHING",
+    previewOpenRanking: "OPEN YOUR RANKING",
+    previewPeakDay: "PEAK DAY",
+    previewRecent: "RECENT ACTIVITY · {shown}/{total}",
+    previewTokensFound: "Your local AI history adds up to {total} tokens.",
+    previewToolBreakdown: "AI TOOL BREAKDOWN",
+    previewTotalTokens: "TOTAL TOKENS",
+    previewSignInWithX: "SIGN IN WITH X & CREATE PROFILE",
+    previewUploadAggregates: "UPLOAD DAILY AGGREGATES",
+    previewUploadPrivacy: "PROMPTS, CODE & CHATS STAY LOCAL",
+    previewViewJson: "full detail: tokenrank preview --json",
     requestTimedOut: "The webhook request deadline was exceeded.",
     ready: "READY",
     removingBackgroundSync: "Removing background sync",
@@ -208,6 +236,34 @@ const cliMessages = {
     privacy: "私密内容绝不离开本机",
     proxyConnectionFailed: "代理连接失败：HTTP {status}",
     proxyResponseInvalid: "代理响应格式不正确。",
+    previewActiveDays: "活跃天数",
+    previewActivity: "每日活动 · 最近 {days} 个活跃日",
+    previewActivitySingle: "每日活动 · 最近 1 个活跃日",
+    previewAiTools: "AI 工具",
+    previewConnectReady: "私人上传链接已连接",
+    previewCopyConnectCommand: "复制私人连接命令",
+    previewCopyConnectHint: "登录后显示",
+    previewDailyAverage: "日均用量",
+    previewDateRange: "UTC 日期范围",
+    previewFootprint: "你的 AI 足迹",
+    previewHeroPrivacy: "仅本地扫描 · 尚未上传任何数据",
+    previewHeroTagline: "你的 AI 用量，一眼看清",
+    previewModelBreakdown: "常用模型",
+    previewModels: "模型数量",
+    previewMoreRows: "另有 {count} 条聚合记录",
+    previewNextClaimTitle: "下一步 · 认领你的排名",
+    previewNextConnectedTitle: "下一步 · 更新你的排名",
+    previewNothingUploaded: "本次预览没有上传任何数据",
+    previewOpenRanking: "查看你的排名",
+    previewPeakDay: "峰值日期",
+    previewRecent: "近期活动 · {shown}/{total}",
+    previewTokensFound: "你的本地 AI 历史累计使用了 {total} Token。",
+    previewToolBreakdown: "AI 工具分布",
+    previewTotalTokens: "Token 总量",
+    previewSignInWithX: "使用 X 登录并创建主页",
+    previewUploadAggregates: "上传每日聚合",
+    previewUploadPrivacy: "Prompt、代码和聊天内容始终留在本机",
+    previewViewJson: "完整明细：tokenrank preview --json",
     requestTimedOut: "webhook 请求超过截止时间。",
     ready: "就绪",
     removingBackgroundSync: "正在移除后台同步",
@@ -4828,19 +4884,395 @@ async function daemon(args) {
   }
 }
 
+const previewWordmark = {
+  token: [
+    "█████  ███  █  ██ █████ █   █",
+    "  █   █   █ █ █   █     ██  █",
+    "  █   █   █ ██    ████  █ █ █",
+    "  █   █   █ █ █   █     █  ██",
+    "  █    ███  █  ██ █████ █   █",
+  ],
+  rank: [
+    "████   ███  █   █ █  ██",
+    "█   █ █   █ ██  █ █ █  ",
+    "████  █████ █ █ █ ██   ",
+    "█ █   █   █ █  ██ █ █  ",
+    "█  ██ █   █ █   █ █  ██",
+  ],
+};
+
+function centerDisplayLine(value, width = uiWidth()) {
+  return `${" ".repeat(Math.max(0, Math.floor((width - displayWidth(value)) / 2)))}${value}`;
+}
+
+async function renderPreviewLogoLine(line, color) {
+  const centered = centerDisplayLine(line);
+  if (process.env.TOKENRANK_NO_ANIMATION === "1") {
+    console.log(trueColor(centered, color));
+    return;
+  }
+
+  const leadingSpace = centered.slice(0, centered.length - line.length);
+  process.stdout.write(leadingSpace);
+  if (useColor) {
+    process.stdout.write(`\x1b[38;2;${color.join(";")}m`);
+  }
+
+  const characters = [...line];
+  for (let index = 0; index < characters.length; index += 3) {
+    process.stdout.write(characters.slice(index, index + 3).join(""));
+    await sleep(4);
+  }
+
+  process.stdout.write(`${useColor ? "\x1b[0m" : ""}\n`);
+}
+
+async function renderPreviewHero() {
+  if (!terminalIsTty || process.env.TOKENRANK_NO_LOGO === "1") {
+    return;
+  }
+
+  console.log("");
+  for (const line of previewWordmark.token) {
+    await renderPreviewLogoLine(line, cliPalette.ivory);
+  }
+  for (const line of previewWordmark.rank) {
+    await renderPreviewLogoLine(line, cliPalette.lime);
+  }
+  console.log("");
+  console.log(trueColor(centerDisplayLine(message("previewHeroTagline")), cliPalette.ivory));
+  console.log(trueColor(centerDisplayLine(message("previewHeroPrivacy")), cliPalette.muted));
+  console.log("");
+}
+
+function addPreviewBreakdownValue(target, key, value) {
+  target.set(key, safeTokenSum(target.get(key) ?? 0, value));
+}
+
+function summarizePreview(entries) {
+  const byTool = new Map();
+  const byModel = new Map();
+  const byDate = new Map();
+  let totalTokens = 0;
+
+  for (const entry of entries) {
+    totalTokens = safeTokenSum(totalTokens, entry.total);
+    addPreviewBreakdownValue(byTool, entry.tool, entry.total);
+    addPreviewBreakdownValue(byModel, entry.model || message("unattributedEmpty"), entry.total);
+    addPreviewBreakdownValue(byDate, entry.date, entry.total);
+  }
+
+  const descendingTotals = ([leftLabel, leftTotal], [rightLabel, rightTotal]) =>
+    rightTotal - leftTotal || leftLabel.localeCompare(rightLabel);
+  const tools = [...byTool.entries()].sort(descendingTotals).map(([label, total]) => ({
+    label,
+    total,
+  }));
+  const models = [...byModel.entries()].sort(descendingTotals).map(([label, total]) => ({
+    label,
+    total,
+  }));
+  const dates = [...byDate.keys()].sort();
+  const days = [...byDate.entries()].sort(([left], [right]) => left.localeCompare(right));
+  const peakDay = [...days].sort(descendingTotals)[0] ?? ["-", 0];
+
+  return {
+    totalTokens,
+    tools,
+    models,
+    dates,
+    days,
+    activeDays: dates.length,
+    firstDate: dates[0] ?? "-",
+    lastDate: dates.at(-1) ?? "-",
+    peakDay: { date: peakDay[0], total: peakDay[1] },
+    dailyAverage: dates.length ? Math.round(totalTokens / dates.length) : 0,
+  };
+}
+
+function previewActivityRows(summary, compactFormatter) {
+  const limit = uiWidth() >= 64 ? 7 : 5;
+  const days = [...summary.days].reverse().slice(0, limit);
+  const maximum = Math.max(...days.map(([, total]) => total), 0);
+  const barWidth = uiWidth() >= 64 ? 18 : 8;
+  const formattedValues = days.map(([, total]) => compactFormatter.format(total));
+  const valueWidth = Math.max(...formattedValues.map(displayWidth), 1);
+  const rows = days.map(([date, total], index) => {
+    const filled = maximum
+      ? Math.max(1, Math.min(barWidth, Math.round((total / maximum) * barWidth)))
+      : 0;
+    return {
+      left: date,
+      right: `${"█".repeat(filled).padEnd(barWidth, " ")} ${padCell(formattedValues[index], valueWidth, "right")}`,
+      leftColor: cliPalette.muted,
+      rightColor: cliPalette.lime,
+    };
+  });
+
+  rows.push(
+    { divider: true },
+    {
+      left: message("previewDailyAverage"),
+      right: compactFormatter.format(summary.dailyAverage),
+      leftColor: cliPalette.muted,
+      rightColor: cliPalette.ivory,
+    },
+  );
+
+  return { days, rows };
+}
+
+function previewBreakdownRows(items, totalTokens, compactFormatter) {
+  const limit = uiWidth() >= 64 ? 5 : 4;
+  const visible = items.slice(0, items.length > limit ? limit - 1 : limit);
+  if (items.length > limit) {
+    visible.push({
+      label: cliLocale === "zh" ? "其他" : "Other",
+      total: items.slice(limit - 1).reduce((total, item) => safeTokenSum(total, item.total), 0),
+    });
+  }
+
+  const barWidth = uiWidth() >= 64 ? 12 : 5;
+  const formattedValues = visible.map((item) => compactFormatter.format(item.total));
+  const valueWidth = Math.max(...formattedValues.map(displayWidth), 1);
+  return visible.map((item, index) => {
+    const rawPercentage = totalTokens ? (item.total / totalTokens) * 100 : 0;
+    const percentage = rawPercentage > 0 && rawPercentage < 1
+      ? "<1%"
+      : `${Math.round(rawPercentage)}%`;
+    const filled = item.total
+      ? Math.max(1, Math.min(barWidth, Math.round((item.total / totalTokens) * barWidth)))
+      : 0;
+    const bar = "█".repeat(filled).padEnd(barWidth, " ");
+    return {
+      left: "",
+      leftSegments: [
+        { value: `${String(index + 1).padStart(2, "0")} `, color: cliPalette.orange },
+        { value: item.label, color: cliPalette.ivory },
+      ],
+      right: `${bar} ${percentage.padStart(4, " ")} · ${padCell(formattedValues[index], valueWidth, "right")}`,
+      rightColor: cliPalette.lime,
+    };
+  });
+}
+
+function printWrappedPreviewText(value, options = {}) {
+  const prefix = options.prefix ?? "  ";
+  const width = Math.max(1, uiWidth() - displayWidth(prefix));
+  for (const [index, line] of wrapDisplayLine(value, width).entries()) {
+    const renderedPrefix = index === 0 ? prefix : " ".repeat(displayWidth(prefix));
+    console.log(`${trueColor(renderedPrefix, options.prefixColor ?? cliPalette.lime)}${trueColor(line, options.color ?? cliPalette.muted)}`);
+  }
+}
+
+function renderPreviewRecent(entries, formatter) {
+  const limit = uiWidth() >= 64 ? 8 : 4;
+  const recent = [...entries]
+    .sort((left, right) => right.date.localeCompare(left.date) || right.total - left.total)
+    .slice(0, limit);
+  const rows = [];
+
+  for (const entry of recent) {
+    if (uiWidth() < 56) {
+      rows.push(
+        {
+          left: "",
+          leftSegments: [
+            { value: `${entry.date} `, color: cliPalette.muted },
+            { value: entry.tool, color: cliPalette.lime },
+          ],
+          right: formatter.format(entry.total),
+          rightColor: cliPalette.orange,
+        },
+        { left: `  ${entry.model}`, leftColor: cliPalette.ivory },
+      );
+    } else {
+      rows.push({
+        left: "",
+        leftSegments: [
+          { value: `${entry.date} `, color: cliPalette.muted },
+          { value: `${padCell(entry.tool, 16)} `, color: cliPalette.lime },
+          { value: entry.model, color: cliPalette.ivory },
+        ],
+        right: formatter.format(entry.total),
+        rightColor: cliPalette.orange,
+      });
+    }
+  }
+
+  if (entries.length > recent.length) {
+    rows.push(
+      { divider: true },
+      {
+        left: message("previewMoreRows", { count: entries.length - recent.length }),
+        right: uiWidth() >= 64 ? message("previewViewJson") : "--json",
+        leftColor: cliPalette.muted,
+        rightColor: cliPalette.muted,
+      },
+    );
+  }
+
+  printPanel(rows, {
+    title: message("previewRecent", { shown: recent.length, total: entries.length }),
+  });
+}
+
+async function previewIsConnected() {
+  try {
+    const config = await readConfig();
+    requireWebhookUrl(config.webhookUrl);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function previewNextStepRows(steps) {
+  const rows = [];
+  for (const [index, step] of steps.entries()) {
+    const leftSegments = [
+      { value: `${String(index + 1).padStart(2, "0")}  `, color: cliPalette.orange },
+      { value: step.label, color: cliPalette.ivory },
+    ];
+    if (uiWidth() >= 64) {
+      rows.push({ left: "", leftSegments, right: step.action, rightColor: cliPalette.orange });
+    } else {
+      rows.push(
+        { left: "", leftSegments },
+        { left: `    ${step.action}`, leftColor: cliPalette.orange },
+      );
+    }
+  }
+  return rows;
+}
+
+function renderPreviewNextSteps(connected) {
+  const steps = connected
+    ? [
+      { label: message("previewUploadAggregates"), action: "tokenrank upload" },
+      { label: message("previewOpenRanking"), action: "tokenrank.org" },
+    ]
+    : [
+      { label: message("previewSignInWithX"), action: "tokenrank.org/onboard" },
+      { label: message("previewCopyConnectCommand"), action: message("previewCopyConnectHint") },
+      { label: message("previewUploadAggregates"), action: "tokenrank upload" },
+    ];
+  const rows = [];
+
+  if (connected) {
+    rows.push({
+      left: "",
+      leftSegments: [
+        { value: "✓  ", color: cliPalette.lime },
+        { value: message("previewConnectReady"), color: cliPalette.ivory },
+      ],
+    });
+    rows.push({ divider: true });
+  }
+
+  rows.push(
+    ...previewNextStepRows(steps),
+    { divider: true },
+    { left: message("previewNothingUploaded"), leftColor: cliPalette.lime },
+    { left: message("previewUploadPrivacy"), leftColor: cliPalette.muted },
+  );
+
+  printPanel(rows, {
+    title: connected ? message("previewNextConnectedTitle") : message("previewNextClaimTitle"),
+  });
+}
+
+async function renderPreviewDashboard(entries) {
+  const locale = cliLocale === "zh" ? "zh-CN" : "en-US";
+  const formatter = new Intl.NumberFormat(locale);
+  const compactFormatter = new Intl.NumberFormat(locale, {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  });
+  const summary = summarizePreview(entries);
+  const activity = previewActivityRows(summary, compactFormatter);
+
+  printWrappedPreviewText(
+    message("previewTokensFound", { total: formatter.format(summary.totalTokens) }),
+    { prefix: "◆ ", prefixColor: cliPalette.orange, color: cliPalette.ivory },
+  );
+
+  printPanel(
+    [
+      {
+        left: message("previewTotalTokens"),
+        right: formatter.format(summary.totalTokens),
+        leftColor: cliPalette.muted,
+        rightColor: cliPalette.lime,
+      },
+      {
+        left: message("previewActiveDays"),
+        right: formatter.format(summary.activeDays),
+        leftColor: cliPalette.muted,
+        rightColor: cliPalette.ivory,
+      },
+      {
+        left: message("previewAiTools"),
+        right: formatter.format(summary.tools.length),
+        leftColor: cliPalette.muted,
+        rightColor: cliPalette.ivory,
+      },
+      {
+        left: message("previewModels"),
+        right: formatter.format(summary.models.length),
+        leftColor: cliPalette.muted,
+        rightColor: cliPalette.ivory,
+      },
+      { divider: true },
+      {
+        left: message("previewDateRange"),
+        right: `${summary.firstDate} → ${summary.lastDate}`,
+        leftColor: cliPalette.muted,
+        rightColor: cliPalette.ivory,
+      },
+      {
+        left: message("previewPeakDay"),
+        right: `${summary.peakDay.date} · ${formatter.format(summary.peakDay.total)}`,
+        leftColor: cliPalette.muted,
+        rightColor: cliPalette.orange,
+      },
+    ],
+    { title: message("previewFootprint") },
+  );
+
+  printPanel(activity.rows, {
+    title: activity.days.length === 1
+      ? message("previewActivitySingle")
+      : message("previewActivity", { days: activity.days.length }),
+  });
+
+  printPanel(previewBreakdownRows(summary.tools, summary.totalTokens, compactFormatter), {
+    title: message("previewToolBreakdown"),
+  });
+  printPanel(previewBreakdownRows(summary.models, summary.totalTokens, compactFormatter), {
+    title: message("previewModelBreakdown"),
+  });
+  renderPreviewRecent(entries, formatter);
+
+  const connected = await previewIsConnected();
+  renderPreviewNextSteps(connected);
+}
+
 async function preview(args) {
+  const json = args.includes("--json");
+  if (!json) {
+    await renderPreviewHero();
+  }
   const entries = await scanLocalUsage(args, { progress: true, panels: false });
   const payload = buildUploadPayload({ entries });
 
-  if (args.includes("--json")) {
+  if (json) {
     console.log(JSON.stringify(payload, null, 2));
     return;
   }
 
-  await printLogo();
-
   if (!entries.length) {
-    if (useColor) {
+    if (terminalIsTty) {
       printPanel(
         [{ left: message("noLocalUsage"), leftColor: cliPalette.muted }],
         { title: message("scanLocalUsage") },
@@ -4851,31 +5283,8 @@ async function preview(args) {
     return;
   }
 
-  if (useColor) {
-    const formatter = new Intl.NumberFormat(cliLocale === "zh" ? "zh-CN" : "en-US");
-    const toolWidth = uiWidth() >= 64 ? 18 : 12;
-    const rows = [
-      {
-        left: cliLocale === "zh" ? "日期 / 工具 / 模型" : "DATE / TOOL / MODEL",
-        right: cliLocale === "zh" ? "TOKEN" : "TOKENS",
-        leftColor: cliPalette.muted,
-        rightColor: cliPalette.muted,
-      },
-      { divider: true },
-      ...entries.map((entry) => ({
-        left: `${entry.date} ${padCell(entry.tool, toolWidth)} ${entry.model}`,
-        leftSegments: [
-          { value: `${entry.date} `, color: cliPalette.muted },
-          { value: `${padCell(entry.tool, toolWidth)} `, color: cliPalette.lime },
-          { value: entry.model, color: cliPalette.ivory },
-        ],
-        right: formatter.format(entry.total),
-        rightColor: cliPalette.orange,
-      })),
-    ];
-    printPanel(rows, {
-      title: `${message("scanLocalUsage")} · ${entries.length} ${rowLabel(entries.length)}`,
-    });
+  if (terminalIsTty) {
+    await renderPreviewDashboard(entries);
     return;
   }
 
