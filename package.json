@@ -1,6 +1,6 @@
 {
   "name": "tokenrank",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "TokenRank local AI token usage collector",
   "type": "module",
   "bin": {
