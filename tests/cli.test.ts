@@ -976,7 +976,7 @@ describe("tokenrank collector CLI", () => {
     expect(styledPlain.split("\n").every((line) => terminalDisplayWidth(line) <= 40)).toBe(true);
   });
 
-  it("renders preview rows as a branded token table in a TTY", async () => {
+  it("renders preview as a branded first-run AI usage reveal in a TTY", async () => {
     const home = await tempHome();
     await writeJsonLog(home, sourceFixturePaths.codex, {
       id: "preview-card-event",
@@ -992,17 +992,135 @@ describe("tokenrank collector CLI", () => {
     });
     const plain = stripAnsi(stdout);
 
-    expect(plain).toContain("TOKENRANK");
-    expect(plain).toContain("SCAN LOCAL USAGE · 1 ROW");
+    expect(plain.startsWith("\n")).toBe(true);
+    expect(plain).toContain("█████  ███  █  ██ █████ █   █");
+    expect(plain).toContain("YOUR AI USAGE, MADE VISIBLE");
+    expect(plain).toContain("Local scan · Nothing uploaded");
+    expect(plain).toContain("YOUR AI FOOTPRINT");
+    expect(plain).toContain("TOTAL TOKENS");
+    expect(plain).toContain("ACTIVE DAYS");
+    expect(plain).toContain("DAILY ACTIVITY · LAST ACTIVE DAY");
+    expect(plain).toContain("AI TOOL BREAKDOWN");
+    expect(plain).toContain("TOP MODELS");
+    expect(plain).toContain("RECENT ACTIVITY · 1/1");
+    expect(plain).toContain("NEXT · CLAIM YOUR RANK");
+    expect(plain).toContain("SIGN IN WITH X & CREATE PROFILE");
+    expect(plain).toContain("tokenrank.org/onboard");
+    expect(plain).toContain("COPY PRIVATE CONNECT COMMAND");
+    expect(plain).toContain("tokenrank upload");
+    expect(plain).toContain("THIS PREVIEW UPLOADED NOTHING");
     expect(plain).toContain("2026-07-12");
     expect(plain).toContain("codex");
     expect(plain).toContain("gpt-5-codex");
     expect(plain).toContain("12");
+    expect(plain.indexOf("YOUR AI USAGE, MADE VISIBLE")).toBeLessThan(
+      plain.indexOf("YOUR AI FOOTPRINT"),
+    );
     expect(plain.split("\n").every((line) => terminalDisplayWidth(line) <= 78)).toBe(true);
     expect(stripAnsi(stderr)).toContain("Scan complete");
     expect(stripAnsi(stderr)).toContain("1 sources");
     expect(stripAnsi(stderr)).toContain("1 files");
     expect(stripAnsi(stderr)).toContain("1 rows");
+  });
+
+  it("summarizes multiple tools, models, dates, and the peak day before recent detail", async () => {
+    const home = await tempHome();
+    await writeJsonLines(home, sourceFixturePaths.codex, [
+      {
+        id: "preview-summary-codex-a",
+        timestamp: "2026-07-10T05:00:00.000Z",
+        model: "gpt-5-codex",
+        usage: { input_tokens: 100, output_tokens: 20 },
+      },
+      {
+        id: "preview-summary-codex-b",
+        timestamp: "2026-07-12T05:00:00.000Z",
+        model: "gpt-5.6-codex",
+        usage: { input_tokens: 50, output_tokens: 10 },
+      },
+    ]);
+    await writeJsonLog(home, sourceFixturePaths["claude-code"], {
+      timestamp: "2026-07-11T05:00:00.000Z",
+      type: "assistant",
+      message: {
+        model: "claude-sonnet-4",
+        usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 30 },
+      },
+    });
+
+    const { stdout } = await runCli(["preview"], home, {
+      TOKENRANK_TEST_TTY: "1",
+      TOKENRANK_NO_ANIMATION: "1",
+      COLUMNS: "78",
+    });
+    const plain = stripAnsi(stdout);
+
+    expect(plain).toContain("225");
+    expect(plain).toMatch(/ACTIVE DAYS\s+3/);
+    expect(plain).toMatch(/AI TOOLS\s+2/);
+    expect(plain).toMatch(/MODELS\s+3/);
+    expect(plain).toContain("2026-07-10 → 2026-07-12");
+    expect(plain).toContain("2026-07-10 · 120");
+    expect(plain).toContain("DAILY ACTIVITY · LAST 3 ACTIVE DAYS");
+    expect(plain).toMatch(/2026-07-12\s+█+\s+60/);
+    expect(plain).toMatch(/2026-07-11\s+█+\s+45/);
+    expect(plain).toMatch(/2026-07-10\s+█+\s+120/);
+    expect(plain).not.toContain("░");
+    expect(plain).toContain("codex");
+    expect(plain).toContain("claude-code");
+    expect(plain).toContain("gpt-5-codex");
+    expect(plain).toContain("gpt-5.6-codex");
+    expect(plain).toContain("claude-sonnet-4");
+    expect(plain.indexOf("YOUR AI FOOTPRINT")).toBeLessThan(
+      plain.indexOf("RECENT ACTIVITY"),
+    );
+  });
+
+  it("keeps the rich preview readable in a narrow colorless terminal", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, sourceFixturePaths.codex, {
+      id: "preview-narrow-event",
+      timestamp: "2026-07-12T05:00:00.000Z",
+      model: "gpt-5-codex-with-a-long-model-name",
+      usage: { input_tokens: 9, output_tokens: 3 },
+    });
+
+    const { stdout } = await runCli(["preview", "--tool", "codex"], home, {
+      TOKENRANK_TEST_TTY: "1",
+      TOKENRANK_NO_ANIMATION: "1",
+      NO_COLOR: "1",
+      COLUMNS: "40",
+    });
+
+    expect(stdout).toContain("YOUR AI FOOTPRINT");
+    expect(stdout).toContain("NEXT · CLAIM YOUR RANK");
+    expect(stdout).toContain("SIGN IN WITH X");
+    expect(stdout).not.toContain("\u001b[");
+    expect(stdout.split("\n").every((line) => terminalDisplayWidth(line) <= 40)).toBe(true);
+  });
+
+  it("changes the preview call to action after a private webhook is connected", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, sourceFixturePaths.codex, {
+      id: "preview-connected-event",
+      timestamp: "2026-07-12T05:00:00.000Z",
+      model: "gpt-5-codex",
+      usage: { input_tokens: 9, output_tokens: 3 },
+    });
+    await runCli(["connect", "https://tokenrank.test/api/collector/upload/secret"], home);
+
+    const { stdout } = await runCli(["preview", "--tool", "codex"], home, {
+      TOKENRANK_TEST_TTY: "1",
+      TOKENRANK_NO_ANIMATION: "1",
+      COLUMNS: "78",
+    });
+    const plain = stripAnsi(stdout);
+
+    expect(plain).toContain("NEXT · UPDATE YOUR RANK");
+    expect(plain).toContain("PRIVATE UPLOAD LINK CONNECTED");
+    expect(plain).toContain("tokenrank upload");
+    expect(plain).toContain("tokenrank.org");
+    expect(plain).not.toContain("SIGN IN WITH X");
   });
 
   it("keeps TTY preview JSON parseable while progress stays on stderr", async () => {
