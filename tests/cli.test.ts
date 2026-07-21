@@ -1123,6 +1123,76 @@ describe("tokenrank collector CLI", () => {
     expect(plain).not.toContain("SIGN IN WITH X");
   });
 
+  it("reuses a complete full Preview scan for a local upload within 30 minutes", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, sourceFixturePaths.codex, {
+      id: "preview-cache-event",
+      timestamp: "2026-07-12T04:30:00.000Z",
+      model: "gpt-5-codex",
+      usage: { input_tokens: 8, output_tokens: 4 },
+    });
+
+    await runCli(["preview", "--json"], home, {
+      TOKENRANK_NOW: "2026-07-12T05:00:00.000Z",
+    });
+    const previewCache = JSON.parse(
+      await readFile(path.join(home, ".tokenrank", "preview-cache.json"), "utf8"),
+    ) as { entries: Array<{ total: number }> };
+    expect(previewCache.entries).toEqual([expect.objectContaining({ total: 12 })]);
+
+    await writeJsonLog(home, sourceFixturePaths.codex, {
+      id: "preview-cache-event",
+      timestamp: "2026-07-12T04:30:00.000Z",
+      model: "gpt-5-codex",
+      usage: { input_tokens: 80, output_tokens: 40 },
+    });
+
+    await withSequencedUploadServer([200], async (webhookUrl, requestCount, payloads) => {
+      await runCli(["connect", webhookUrl], home);
+      const { stderr } = await runCli(["upload"], home, {
+        TOKENRANK_NOW: "2026-07-12T05:10:00.000Z",
+      });
+
+      expect(stderr).toContain("Using your recent Preview scan; skipping local rescan.");
+      expect(requestCount()).toBe(1);
+      expect(payloads[0]).toMatchObject({
+        entries: [expect.objectContaining({ total: 12 })],
+      });
+    });
+  });
+
+  it("rescans local usage after the Preview cache expires", async () => {
+    const home = await tempHome();
+    await writeJsonLog(home, sourceFixturePaths.codex, {
+      id: "preview-cache-expiry-event",
+      timestamp: "2026-07-12T04:30:00.000Z",
+      model: "gpt-5-codex",
+      usage: { input_tokens: 8, output_tokens: 4 },
+    });
+    await runCli(["preview", "--json"], home, {
+      TOKENRANK_NOW: "2026-07-12T05:00:00.000Z",
+    });
+    await writeJsonLog(home, sourceFixturePaths.codex, {
+      id: "preview-cache-expiry-event",
+      timestamp: "2026-07-12T04:30:00.000Z",
+      model: "gpt-5-codex",
+      usage: { input_tokens: 80, output_tokens: 40 },
+    });
+
+    await withSequencedUploadServer([200], async (webhookUrl, requestCount, payloads) => {
+      await runCli(["connect", webhookUrl], home);
+      const { stderr } = await runCli(["upload"], home, {
+        TOKENRANK_NOW: "2026-07-12T05:31:00.000Z",
+      });
+
+      expect(stderr).not.toContain("Using your recent Preview scan; skipping local rescan.");
+      expect(requestCount()).toBe(1);
+      expect(payloads[0]).toMatchObject({
+        entries: [expect.objectContaining({ total: 120 })],
+      });
+    });
+  });
+
   it("keeps TTY preview JSON parseable while progress stays on stderr", async () => {
     const home = await tempHome();
     await writeJsonLog(home, sourceFixturePaths.codex, {

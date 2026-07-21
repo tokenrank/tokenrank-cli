@@ -123,6 +123,7 @@ const cliMessages = {
     previewNothingUploaded: "THIS PREVIEW UPLOADED NOTHING",
     previewOpenRanking: "OPEN YOUR RANKING",
     previewPeakDay: "PEAK DAY",
+    previewCacheReuse: "Using your recent Preview scan; skipping local rescan.",
     previewRecent: "RECENT ACTIVITY · {shown}/{total}",
     previewTokensFound: "Your local AI history adds up to {total} tokens.",
     previewToolBreakdown: "AI TOOL BREAKDOWN",
@@ -256,6 +257,7 @@ const cliMessages = {
     previewNothingUploaded: "本次预览没有上传任何数据",
     previewOpenRanking: "查看你的排名",
     previewPeakDay: "峰值日期",
+    previewCacheReuse: "复用刚才的 Preview 扫描结果，跳过本地重复统计。",
     previewRecent: "近期活动 · {shown}/{total}",
     previewTokensFound: "你的本地 AI 历史累计使用了 {total} Token。",
     previewToolBreakdown: "AI 工具分布",
@@ -503,6 +505,8 @@ const accountingVersion = 2;
 const defaultCollectorIntervalSeconds = 60 * 60;
 const uploadBatchSize = 500;
 const maxUploadAttempts = 4;
+const previewCacheVersion = 1;
+const previewCacheMaxAgeMilliseconds = 30 * 60 * 1000;
 const TOKEN_COUNT_FIELDS = ["input", "output", "cacheRead", "cacheWrite", "total"];
 const terminalIsTty = process.env.TOKENRANK_TEST_TTY === "1" || Boolean(process.stdout.isTTY);
 const progressIsTty = process.env.TOKENRANK_TEST_TTY === "1" || Boolean(process.stderr.isTTY);
@@ -1195,6 +1199,10 @@ function pendingIncrementalPath() {
   return path.join(homedir(), ".tokenrank", "pending-incremental.json");
 }
 
+function previewCachePath() {
+  return path.join(homedir(), ".tokenrank", "preview-cache.json");
+}
+
 function collectorLockPath() {
   return path.join(homedir(), ".tokenrank", "collector.lock");
 }
@@ -1432,6 +1440,43 @@ function isPendingIncrementalState(value) {
   return value.digest === incrementalDigestFor(value);
 }
 
+function isPreviewCache(value) {
+  if (
+    !isPlainObject(value) ||
+    value.version !== previewCacheVersion ||
+    value.accountingVersion !== accountingVersion ||
+    !isIsoTimestamp(value.createdAt) ||
+    !Array.isArray(value.entries) ||
+    value.entries.length > sourceFileLimit()
+  ) {
+    return false;
+  }
+
+  const keys = new Set();
+  for (const entry of value.entries) {
+    if (!isPlainObject(entry)) {
+      return false;
+    }
+    try {
+      const normalized = normalizeEntry(entry);
+      const key = aggregateKey(normalized);
+      if (
+        keys.has(key) ||
+        !["date", "tool", "model", ...TOKEN_COUNT_FIELDS].every(
+          (field) => entry[field] === normalized[field],
+        )
+      ) {
+        return false;
+      }
+      keys.add(key);
+    } catch {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 async function readAggregateState() {
   return readJsonState(aggregateStatePath(), null, isAggregateState);
 }
@@ -1486,6 +1531,19 @@ async function readPendingIncremental() {
     null,
     isPendingIncrementalState,
   );
+}
+
+async function readPreviewCache() {
+  return readJsonState(previewCachePath(), null, isPreviewCache);
+}
+
+async function writePreviewCache(entries, now = currentTime()) {
+  return writeJsonStateAtomic(previewCachePath(), {
+    version: previewCacheVersion,
+    accountingVersion,
+    createdAt: now.toISOString(),
+    entries,
+  });
 }
 
 async function writePendingIncremental(state) {
@@ -3765,6 +3823,27 @@ async function upload(args, options = {}) {
 }
 
 async function scanUploadInput(args, { quiet, sinceOverride, requireComplete }) {
+  const scanOptions = getScanOptions(args);
+  const previewCache =
+    !scanOptions.tool && !scanOptions.since ? await readPreviewCache() : null;
+  const previewCacheCreatedAt = previewCache ? new Date(previewCache.createdAt).getTime() : NaN;
+  const previewCacheAge = currentTime().getTime() - previewCacheCreatedAt;
+
+  if (
+    previewCache &&
+    previewCacheAge >= 0 &&
+    previewCacheAge <= previewCacheMaxAgeMilliseconds
+  ) {
+    if (!quiet) {
+      console.error(message("previewCacheReuse"));
+    }
+    return {
+      entries: sinceOverride
+        ? previewCache.entries.filter((entry) => entry.date >= sinceOverride)
+        : previewCache.entries,
+    };
+  }
+
   const scanHealth = { truncated: false, readErrors: 0, skippedOversize: 0 };
   const scanResult = await scanLocalUsage(args, {
     progress: !quiet,
@@ -5263,7 +5342,25 @@ async function preview(args) {
   if (!json) {
     await renderPreviewHero();
   }
-  const entries = await scanLocalUsage(args, { progress: true, panels: false });
+  const scanResult = await scanLocalUsage(args, {
+    progress: true,
+    panels: false,
+    returnMeta: true,
+  });
+  const entries = scanResult.entries;
+  const scanOptions = getScanOptions(args);
+  const scanIsComplete =
+    !scanResult.health.truncated &&
+    scanResult.health.readErrors === 0 &&
+    scanResult.health.skippedOversize === 0;
+
+  if (!scanOptions.tool && !scanOptions.since && scanIsComplete) {
+    try {
+      await writePreviewCache(entries);
+    } catch {
+      // The preview remains useful even if its optional local optimization cannot be persisted.
+    }
+  }
   const payload = buildUploadPayload({ entries });
 
   if (json) {
