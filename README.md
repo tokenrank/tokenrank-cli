@@ -1,47 +1,51 @@
-<p align="center">
-  <img src="./assets/readme/hero.svg" width="100%" alt="TokenRank CLI 在本机预览 AI Token 用量，只把 UTC 聚合行同步到私人 webhook">
+<p align="right">
+  <strong>English</strong> · <a href="./README.zh-CN.md">Chinese</a>
 </p>
 
 <p align="center">
-  <a href="https://tokenrank.org"><strong>TokenRank 榜单</strong></a> ·
-  <a href="https://tokenrank.org/onboard">生成私人 webhook</a> ·
-  <a href="./docs/api-contract.md">上传 API 契约</a> ·
-  <a href="./CHANGELOG.md">更新日志</a>
+  <img src="./assets/readme/hero.svg" width="100%" alt="TokenRank CLI previews AI token usage locally and syncs only UTC aggregate rows to a private webhook">
 </p>
 
-TokenRank CLI 是 [TokenRank](https://tokenrank.org) 的独立本地采集器。它扫描受支持 AI 工具的精确 Token 记录，在设备上按 UTC 日期、工具和模型聚合，再把聚合行上传到用户自己的私人 webhook。
+<p align="center">
+  <a href="https://tokenrank.org"><strong>TokenRank leaderboard</strong></a> ·
+  <a href="https://tokenrank.org/onboard">Generate a private webhook</a> ·
+  <a href="./docs/api-contract.md">Upload API contract</a> ·
+  <a href="./CHANGELOG.md">Changelog</a>
+</p>
 
-**先预览，再决定是否连接：**
+TokenRank CLI is the standalone local collector for [TokenRank](https://tokenrank.org). It reads exact token records from supported AI tools, aggregates them on the device by UTC date, tool, and model, then sends aggregate rows to the user's private webhook.
+
+**Preview first. Connect only when you are ready:**
 
 ```bash
 npx --yes tokenrank preview
 ```
 
-这条命令不需要账号、不会上传数据，也不会修改后台任务。
+This command requires no account, uploads nothing, and does not change background services.
 
-## 安装
+## Install
 
-CLI 需要 Node.js 20 或更高版本，运行时零第三方依赖。
+The CLI requires Node.js 20 or newer and has zero runtime dependencies.
 
-### 稳定安装入口
+### Stable installers
 
-macOS / Linux：
+macOS / Linux:
 
 ```bash
 curl -fsSL "https://tokenrank.org/install.sh" | bash
 ```
 
-Windows PowerShell：
+Windows PowerShell:
 
 ```powershell
 irm "https://tokenrank.org/install.ps1" | iex
 ```
 
-网站安装入口会注入当前用户的私人 webhook，并转交到本仓库最新 release。也可以直接使用 [GitHub Releases](https://github.com/tokenrank/tokenrank-cli/releases/latest) 中的安装器。
+The website installers inject the current user's private webhook and hand off to this repository's latest release. You can also install directly from [GitHub Releases](https://github.com/tokenrank/tokenrank-cli/releases/latest).
 
-## 快速开始
+## Quick start
 
-在 [TokenRank Onboarding](https://tokenrank.org/onboard) 生成私人 webhook 后：
+After generating a private webhook in [TokenRank Onboarding](https://tokenrank.org/onboard):
 
 ```bash
 tokenrank connect "https://tokenrank.org/api/collector/upload/<token>"
@@ -51,42 +55,42 @@ tokenrank service install
 tokenrank status
 ```
 
-安装器按 `connect → initial upload → service install` 执行；只有首次上传成功才注册后台任务。
+Installers follow `connect → initial upload → service install`. A background service is registered only after the first upload succeeds.
 
-## 命令地图
+## Command map
 
-| 命令 | 用途 | 是否上传 |
+| Command | Purpose | Uploads data |
 | --- | --- | --- |
-| `tokenrank preview [--json]` | 扫描并展示即将生成的聚合 payload | 否 |
-| `tokenrank tools` | 列出支持的 AI 工具 | 否 |
-| `tokenrank sources` | 查看来源适配器状态 | 否 |
-| `tokenrank doctor` | 诊断精确数据源与可用记录 | 否 |
-| `tokenrank connect <url>` | 在本机保存私人 webhook | 否 |
-| `tokenrank upload` | 上传本次完整或增量聚合 | 是 |
-| `tokenrank status [--json]` | 检查连接、同步与 aggregate state | 否 |
-| `tokenrank service install` | 注册每小时错峰同步 | 首次安装前已完成上传 |
-| `tokenrank service status` | 检查系统后台任务 | 否 |
-| `tokenrank service uninstall` | 移除后台任务 | 否 |
-| `tokenrank logout` | 移除本机连接信息 | 否 |
+| `tokenrank preview [--json]` | Scan and show the aggregate payload before upload | No |
+| `tokenrank tools` | List supported AI tools | No |
+| `tokenrank sources` | Show source adapter status | No |
+| `tokenrank doctor` | Diagnose exact data sources and usable records | No |
+| `tokenrank connect <url>` | Save a private webhook on the device | No |
+| `tokenrank upload` | Upload the current full or incremental aggregate | Yes |
+| `tokenrank status [--json]` | Check connection, sync, and aggregate state | No |
+| `tokenrank service install` | Register hourly staggered sync | Initial upload already completed |
+| `tokenrank service status` | Inspect the system background job | No |
+| `tokenrank service uninstall` | Remove the background job | No |
+| `tokenrank logout` | Remove the local connection | No |
 
-所有命令支持 `--lang zh`、`--lang en`、`--lang auto`；也可以设置 `TOKENRANK_LANG=zh|en`。
+All commands support `--lang en`, `--lang zh`, and `--lang auto`. You can also set `TOKENRANK_LANG=en|zh`.
 
-## 隐私边界
+## Privacy boundary
 
-| 会上传 | 永远不上传 |
+| Uploaded | Never uploaded |
 | --- | --- |
-| UTC 日期、AI 工具、模型 | Prompt、聊天正文 |
-| input、output、cache read、cache write、total | 源码、文件名、文件内容 |
-| 匿名设备标识、CLI 版本、时区、生成时间 | 原始日志、Provider 凭据 |
+| UTC date, AI tool, and model | Prompts and chat content |
+| Input, output, cache read, cache write, and total tokens | Source code, filenames, and file contents |
+| Anonymous device ID, CLI version, timezone, and generation time | Raw logs and provider credentials |
 
-- `preview --json` 可以在上传前检查完整 payload。
-- `doctor` 不显示本机来源路径或原始日志内容。
-- 本地 state 只保存日期、工具、模型与 Token 聚合，不保存会话正文。
-- 缺少精确 Token 字段时，CLI 不会用请求数、积分、字符数或估算值替代。
+- `preview --json` exposes the complete payload before upload.
+- `doctor` does not print local source paths or raw log content.
+- Local state contains dates, tools, models, and token aggregates—not conversation content.
+- When an exact token field is unavailable, the CLI does not substitute request counts, credits, character counts, or estimates.
 
-## 支持的工具
+## Supported tools
 
-当前内置 18 个来源适配器：
+The CLI currently ships 18 source adapters:
 
 ```text
 codex             claude-code       hermes
@@ -97,42 +101,42 @@ roo-code          qwen              codex-cache
 cursor            github-copilot    continue
 ```
 
-工具归属按实际发起模型调用的 AI 工具判断，与宿主编辑器无关。例如 Cursor 中运行的 Codex 仍计入 `codex`。主 Agent 与本地日志可观测的 subagent 调用汇入同一工具总量，但不会上传 subagent 明细。
+Attribution follows the AI tool that actually made the model call, not the host editor. For example, Codex running inside Cursor still counts as `codex`. Calls from a main agent and locally observable subagents roll into the same tool total; no subagent-level detail is uploaded.
 
-采集器按 provider event ID 和来源优先级去重。Cursor、GitHub Copilot 与 Continue 只有在来源包含明确 Token 类型时才会计入。
+The collector deduplicates events by provider event ID and source priority. Cursor, GitHub Copilot, and Continue contribute only when their source includes explicit token fields.
 
-## 自动同步与恢复
+## Automatic sync and recovery
 
-macOS 使用 LaunchAgent，Linux 使用 persistent systemd user timer，Windows 使用隐藏、非交互的 Task Scheduler 任务。
+macOS uses a LaunchAgent, Linux uses a persistent systemd user timer, and Windows uses a hidden, non-interactive Task Scheduler job.
 
-- 每台设备按匿名 `deviceId` 固定选择一个 0–59 分钟的错峰分钟；
-- 错过计划时间后会在下次启动或登录时补传；
-- 本机锁与计划边界状态会避免并发快照和重复运行；
-- 非 TTY 与后台任务默认不输出交互进度；
-- direct、HTTP proxy 与 HTTPS CONNECT 都有绝对 deadline。
+- Each device derives one stable staggered minute from its anonymous `deviceId`.
+- Missed schedules catch up on the next startup or login.
+- Local locks and schedule-boundary state prevent concurrent snapshots and duplicate runs.
+- Non-TTY and background runs hide interactive progress by default.
+- Direct, HTTP proxy, and HTTPS CONNECT attempts all have absolute deadlines.
 
 <details>
-<summary><strong>v2 cutover / high-water 正确性模型</strong></summary>
+<summary><strong>v2 cutover / high-water correctness model</strong></summary>
 
-所有事件统一归入 UTC 日历日。首次 v2 同步从服务端确认的 UTC cutover 日期开始，使用可重放的原子完整快照；之后每小时只发送新增或变大的 high-water 聚合行，没有变化就不请求服务器。
+All events are assigned to UTC calendar days. The first v2 sync starts from the server-confirmed UTC cutover date and uses a replayable atomic full snapshot. Later hourly syncs send only new or increased high-water aggregate rows; when nothing changes, the CLI makes no request.
 
-完整快照与 incremental 在发送前都会持久化 pending/WAL，全部批次确认后才清理。日志轮转、短暂失败或扫描范围缩小不会调低已确认历史；本机 aggregate state 丢失或损坏时，CLI 会依据服务端权威 cutover 自动重扫。切换到不同账号时会清空旧账号 aggregate state，避免跨账号复用数据。
+Full snapshots and incremental uploads persist pending/WAL state before sending and clear it only after every batch is acknowledged. Log rotation, temporary failures, or a reduced scan cannot lower confirmed history. If local aggregate state is missing or corrupt, the CLI rescans from the server-authoritative cutover. Switching to a different account clears the previous account's aggregate state to prevent cross-account reuse.
 
-任何 stateful scan 出现文件上限截断、读取错误或超大记录跳过，都会拒绝上传和推进 ACK。协议详情见 [docs/api-contract.md](docs/api-contract.md)。
+Any stateful scan that hits a file-limit truncation, read error, or oversized-record skip fails closed: it neither uploads nor advances the ACK. See [docs/api-contract.md](docs/api-contract.md) for the protocol.
 
 </details>
 
-## 终端行为
+## Terminal behavior
 
-彩色 TTY 使用信号绿 `#D6FF3F`、警示橙 `#FF5B35`、象牙白 `#F2F1E8` 与灰绿 `#858B80`，以紧凑卡片、表格和单行状态反馈呈现真实扫描与上传进度。
+Interactive color output uses signal lime `#D6FF3F`, warning orange `#FF5B35`, ivory `#F2F1E8`, and muted green `#858B80`. Compact cards, tables, and single-line status messages keep real scan and upload progress in focus.
 
-- 进度只写入 stderr，`preview --json`、管道和重定向的 stdout 保持纯净；
-- `NO_COLOR=1` 关闭颜色；
-- `TOKENRANK_NO_ANIMATION=1` 保留静态状态但关闭动画；
-- `TOKENRANK_NO_PROGRESS=1` 完全关闭交互进度；
-- 宽终端最多使用 78 列，窄终端自动切换紧凑布局，不依赖 Nerd Font。
+- Progress is written only to stderr, so `preview --json`, pipes, and redirected stdout remain clean.
+- `NO_COLOR=1` disables color.
+- `TOKENRANK_NO_ANIMATION=1` keeps static status feedback but disables animation.
+- `TOKENRANK_NO_PROGRESS=1` disables interactive progress entirely.
+- Wide terminals use at most 78 columns; narrow terminals switch to a compact layout and require no Nerd Font.
 
-## 本地开发
+## Local development
 
 ```bash
 pnpm install
@@ -143,25 +147,25 @@ pnpm test
 pnpm tokenrank tools
 ```
 
-测试覆盖日期归一化、来源解析、subagent 汇总、事件去重、v2 cutover/high-water、原子多批快照、重试与 4xx 边界、代理、计划补跑，以及 macOS、Linux、Windows 的后台任务配置。
+Tests cover date normalization, source parsing, subagent aggregation, event deduplication, v2 cutover/high-water behavior, atomic multi-batch snapshots, retry and 4xx boundaries, proxies, schedule recovery, and background jobs on macOS, Linux, and Windows.
 
-## 项目边界
+## Project boundary
 
 | TokenRank CLI | TokenRank Web |
 | --- | --- |
-| 本地扫描与流式聚合 | X 身份与 webhook 生命周期 |
-| CLI 展示、安装器、后台调度 | 服务端 payload 校验与持久化 |
-| 客户端 payload、版本与 release | 排行榜、公开资料与 Dashboard |
+| Local scanning and streaming aggregation | X identity and webhook lifecycle |
+| CLI output, installers, and background scheduling | Server-side payload validation and persistence |
+| Client payload, version, and release | Leaderboards, public profiles, and dashboard |
 
-共享边界是 `GET/POST /api/collector/upload/:token`。本仓库不得导入 TokenRank Web 源码，也不依赖 Next.js、数据库或认证模块。
+The shared boundary is `GET/POST /api/collector/upload/:token`. This repository must not import TokenRank Web source code and does not depend on Next.js, a database, or authentication modules.
 
-## 发布
+## Release
 
-1. 更新 `package.json` 版本与 `CHANGELOG.md`。
-2. 运行 `pnpm check`、`pnpm lint`、`pnpm typecheck`、`pnpm test`。
-3. 推送 `vX.Y.Z` tag。
-4. GitHub Actions 创建 release 并附加 CLI、package metadata 与两端安装器。
+1. Update the version in `package.json` and add an entry to `CHANGELOG.md`.
+2. Run `pnpm check`, `pnpm lint`, `pnpm typecheck`, and `pnpm test`.
+3. Push a `vX.Y.Z` tag.
+4. GitHub Actions creates a release with the CLI, package metadata, and both platform installers.
 
-## 参与与许可
+## Contributing and license
 
-问题与数据源建议请提交到 [GitHub Issues](https://github.com/tokenrank/tokenrank-cli/issues)。项目采用 [MIT License](LICENSE) 开源。
+Please use [GitHub Issues](https://github.com/tokenrank/tokenrank-cli/issues) for bugs and source-adapter proposals. TokenRank CLI is released under the [MIT License](LICENSE).
